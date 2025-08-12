@@ -1,0 +1,28 @@
+# Ignore model files
+*.pth
+
+# Ignore image files
+*.png
+
+# Ignore model and plot directories
+/models/
+/models_cnn02/
+/plots/
+/plots_bart/
+/plots_cnn02/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
