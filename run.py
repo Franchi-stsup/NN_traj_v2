@@ -14,7 +14,7 @@ from src.network import CircleCNN, CircleCNN_02, CircleDataset, print_device_inf
 from src.train import train_model, save_model, load_pretrained_model, demo_pretrained_usage
 from src.plots import (plot_training_curves, visualize_results, plot_circle, 
                    analyze_model_predictions, plot_pretrained_demo)
-from src.network_utils import shift_trajectory, rotate_traj, complex_traj, plot_trajs, demo_trajectory_utilities
+from src.network_utils import shift_trajectory, rotate_traj, complex_traj, demo_trajectory_utilities
 from src.bart_config import PipelineConfig, create_default_config
 from src.bart_interpolation_fct import fast_kspace_interpolation_v3
 from src.bart_utils import run_bart_nufft, build_para, rescale_recon_img, plot_comparison, downsample_image
@@ -72,8 +72,8 @@ def parse_arguments():
                        help='MSE weight in smooth loss (default: 1.0)')
     parser.add_argument('--first_deriv_weight', type=float, default=0.001,
                        help='First derivative weight in smooth loss (default: 0.001)')
-    parser.add_argument('--second_deriv_weight', type=float, default=0.000,
-                       help='Second derivative weight in smooth loss (default: 0.000)')
+    parser.add_argument('--second_deriv_weight', type=float, default=0.0005,
+                       help='Second derivative weight in smooth loss (default: 0.0005)')
     
     # File paths
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -208,7 +208,7 @@ def run_training(args):
         use_scheduler=args.use_scheduler,
         mse_weight=args.mse_weight if use_smooth else 1.0,
         first_deriv_weight=args.first_deriv_weight if use_smooth else 0.001,
-        second_deriv_weight=args.second_deriv_weight if use_smooth else 0.000,
+        second_deriv_weight=args.second_deriv_weight if use_smooth else 0.0005,
         save_params=save_params
     )
     
@@ -230,7 +230,7 @@ def run_training(args):
         'num_epochs': args.num_epochs,
         'learning_rate': args.learning_rate,
         'batch_size': args.batch_size,
-        'radius': args.radius,
+        # 'radius': args.radius,  # Removed radius from folder names
         'use_scheduler': args.use_scheduler,
         'use_smooth_loss': args.use_smooth_loss and not args.no_smooth_loss
     }
@@ -250,7 +250,7 @@ def run_training(args):
         'num_epochs': args.num_epochs,
         'learning_rate': args.learning_rate,
         'batch_size': args.batch_size,
-        'radius': args.radius,
+        # 'radius': args.radius,  # Removed radius from model names
         'use_scheduler': args.use_scheduler,
         'use_smooth_loss': args.use_smooth_loss and not args.no_smooth_loss,
         'use_cnn_02': args.use_cnn_02
@@ -343,7 +343,7 @@ def run_demo(args, run_folder=None, model=None, model_path=None):
         model.eval()
         with torch.no_grad():
             # Create test input
-            test_input = torch.linspace(0, 0.64, 128 + 1) #+ 0.01 * torch.randn(128)
+            test_input = torch.linspace(0, 0.5, 128 + 1) #+ 0.01 * torch.randn(128)
             test_input = test_input[:-1]  # Remove last point to match output length
             test_input = test_input.unsqueeze(0).to(next(model.parameters()).device)
             
@@ -388,7 +388,7 @@ def run_demo(args, run_folder=None, model=None, model_path=None):
             model.eval()
             with torch.no_grad():
                 # Create test input
-                test_input = torch.linspace(0, 0.64, 128) #+ 0.01 * torch.randn(128)
+                test_input = torch.linspace(0, 0.5, 128) #+ 0.01 * torch.randn(128)
                 test_input = test_input.unsqueeze(0).to(next(model.parameters()).device)
                 
                 # Get prediction

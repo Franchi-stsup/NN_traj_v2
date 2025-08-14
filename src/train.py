@@ -164,10 +164,10 @@ class SmoothLoss(nn.Module):
 
 
         # First derivative penalty: penalize maximum absolute derivative
-        first_deriv_penalty = torch.max(torch.abs(pred_first_deriv))
+        # first_deriv_penalty = torch.max(torch.abs(pred_first_deriv))
         
         # Second derivative penalty: penalize maximum absolute second derivative
-        second_deriv_penalty = torch.max(torch.abs(pred_second_deriv))
+        # second_deriv_penalty = torch.max(torch.abs(pred_second_deriv))
         
         # Optional: Also penalize difference between predicted and target derivatives
         first_deriv_mse = self.mse_loss(pred_first_deriv, target_first_deriv)
@@ -175,15 +175,15 @@ class SmoothLoss(nn.Module):
         
         # Total loss
         total_loss = (self.mse_weight * mse_loss + 
-                     self.first_deriv_weight * (first_deriv_penalty + first_deriv_mse) +
-                     self.second_deriv_weight * (second_deriv_penalty + second_deriv_mse))
+                     self.first_deriv_weight *  first_deriv_mse +
+                     self.second_deriv_weight *  + second_deriv_mse)
         
         # Return loss components for monitoring
         loss_components = {
             'total_loss': total_loss,
             'mse_loss': mse_loss,
-            'first_deriv_penalty': first_deriv_penalty,
-            'second_deriv_penalty': second_deriv_penalty,
+            # 'first_deriv_penalty': first_deriv_penalty,
+            # 'second_deriv_penalty': second_deriv_penalty,
             'first_deriv_mse': first_deriv_mse,
             'second_deriv_mse': second_deriv_mse
         }
@@ -587,8 +587,8 @@ def save_model(model, filepath='circle_cnn_model.pth', save_full=False, save_dir
             params.append(f"lr{kwargs['learning_rate']:.0e}")
         if 'batch_size' in kwargs:
             params.append(f"bs{kwargs['batch_size']}")
-        if 'radius' in kwargs:
-            params.append(f"r{kwargs['radius']}")
+        # if 'radius' in kwargs:
+        #     params.append(f"r{kwargs['radius']}")
         if 'use_scheduler' in kwargs and kwargs['use_scheduler']:
             params.append("sched")
         if 'use_smooth_loss' in kwargs and kwargs['use_smooth_loss']:
@@ -716,7 +716,7 @@ def demo_pretrained_usage(model_path='circle_cnn_model.pth', load_dir='models', 
         return None
     
     # Create some test input (simulated time signal)
-    test_input = torch.linspace(0, 0.64, 128) # + 0.01 * torch.randn(128)
+    test_input = torch.linspace(0, 0.5, 128) # + 0.01 * torch.randn(128)
     
     # Single sample inference
     prediction = inference_single_sample(model, test_input)

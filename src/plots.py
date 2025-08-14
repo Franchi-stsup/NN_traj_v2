@@ -38,8 +38,8 @@ def create_run_folder(save_path='plots', **kwargs):
         params.append(f"lr{kwargs['learning_rate']:.0e}")
     if 'batch_size' in kwargs:
         params.append(f"bs{kwargs['batch_size']}")
-    if 'radius' in kwargs:
-        params.append(f"r{kwargs['radius']}")
+    # if 'radius' in kwargs:
+    #     params.append(f"r{kwargs['radius']}")
     if 'use_scheduler' in kwargs and kwargs['use_scheduler']:
         params.append("sched")
     if 'use_smooth_loss' in kwargs and kwargs['use_smooth_loss']:
@@ -370,9 +370,9 @@ def plot_rotated_trajectories(kSpaceTrj, save_path, filename='trajectory_rotatio
     kyy = kSpaceTrj['kyy']
     n_rotations = kxx.shape[1]
     
-    for i in range(kxx.shape[1]):
-        plt.plot(kxx[:, i], kyy[:, i], lw=0.8, alpha=0.7)
-    
+    for i in range(kxx.shape[0]):
+        plt.plot(kxx[i, :], kyy[i, :], lw=0.8, alpha=0.7)
+
     plt.xlabel("kx")
     plt.ylabel("ky")
     plt.axis("equal")
@@ -412,8 +412,8 @@ def plot_trajectory_utilities_combined(kx, ky, kx_shifted, ky_shifted, kSpaceTrj
     plt.plot(kx_shifted, ky_shifted, 'r-', linewidth=2, label='Shifted', alpha=0.8)
     
     # Plot a few rotated versions
-    for i in range(0, min(5, kxx.shape[1])):
-        plt.plot(kxx[:, i], kyy[:, i], '--', linewidth=1, alpha=0.5, 
+    for i in range(0, min(5, kxx.shape[0])):
+        plt.plot(kxx[i, :], kyy[i, :], '--', linewidth=1, alpha=0.5, 
                 label=f'Rotated {i+1}' if i < 3 else None)
     
     plt.xlabel("kx")

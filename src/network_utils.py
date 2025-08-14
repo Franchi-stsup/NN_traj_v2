@@ -2,74 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sys
 
-
-# def run_bart_nufft(mrData, kSpaceTrj, para, run_gpu=False):
-#     """
-#     Python translation of MATLAB runBartRecon4 for BART NUFFT reconstruction.
-#     Args:
-#         mrData: numpy array, k-space data
-#         kSpaceTrj: dict with keys 'kxx', 'kyy'
-#         para: dict of parameters
-#     Returns:
-#         reconMrsi: reconstructed image (numpy array)
-#     """
-
-#     # --- Parameter defaults ---
-#     para = para.copy()
-#     para.setdefault('oprPath', None)
-#     para.setdefault('isWaterRef', False)
-#     para.setdefault('dbgOn', False)
-#     para.setdefault('csReg', 0.05)
-#     para.setdefault('csMap', None)
-#     para.setdefault('itr', 50)
-#     para.setdefault('CGitr', 5)
-#     para.setdefault('useNorm', False)
-#     para.setdefault('applyFilter', '')
-#     para.setdefault('reconType', None)
-#     para.setdefault('kFac', 1)
-#     para.setdefault('doK0Cor', False)
-#     para.setdefault('k0ZeroFill', 4)
-#     para.setdefault('doB0Cor', False)
-#     para.setdefault('B0refCh', 27)
-#     para.setdefault('B0corMode', 'lin')
-#     para.setdefault('acqConf', {'H1offset': 4.7})
-#     para.setdefault('mSize', mrData.shape[1] if mrData.ndim > 1 else mrData.shape[0])
-
-#     # --- Normalize k-space trajectory ---
-#     # print kspace_traj
-#     # print(f"Normalizing k-space trajectory with max value: {np.max(np.abs(kSpaceTrj['kxx']))}")
-#     kxx = kSpaceTrj['kxx'] / np.max(np.abs(kSpaceTrj['kxx'])) * para['mSize']/2 * para['kFac']
-#     kyy = kSpaceTrj['kyy'] / np.max(np.abs(kSpaceTrj['kyy'])) * para['mSize']/2 * para['kFac']
-
-#     # print(f"Normalized k-space trajectory shapes: kxx={kxx.shape}, kyy={kyy.shape}")
-#     kxx = kxx.reshape(1, kxx.shape[0], kxx.shape[1])
-#     kyy = kyy.reshape(1, kyy.shape[0], kyy.shape[1])
-
-#     # print(f"Added a 3rd dimension to kxx and kyy: kxx={kxx.shape}, kyy={kyy.shape}")
-#     kspaceRSI = np.concatenate([kxx, kyy], axis=0)
-#     # print(f"kspace RSI shape: {kspaceRSI.shape}")
-#     kspaceRSI = np.concatenate([kspaceRSI, np.zeros((1, kxx.shape[1], kxx.shape[2]))], axis=0)
-#     # print(f"kspace RSI shape with 3rd axis: {kspaceRSI.shape}")
-#     # print(f"Last column of kspaceRSI (should be zeros): {kspaceRSI[-1, :, :]}")
-
-#     # --- Reshape mrData ---
-#     # MATLAB: mrData = reshape( mrData, [1 size(mrData,1) size(mrData,2) size(mrData,3) 1 1 1 1 1 1 size(mrData,4)] );
-#     # For typical 2D data, this becomes (1, Nx, Ny, 1, 1, 1, 1, 1, 1, 1, 1)
-#     shape = [1] + list(mrData.shape) + [1]*(11-len(mrData.shape)-1)
-#     # print(f"Shape {shape}")
-#     mrData_reshaped = mrData.reshape(shape)
-#     mrData2 = np.squeeze(mrData_reshaped)
-#     mrData2 = mrData2[np.newaxis, :, :]
-
-#     # --- BART NUFFT reconstruction ---
-#     if run_gpu:
-#         print(f"Run_gpu = {run_gpu}")
-#         reconMrsi = bart(1, 'nufft -i -t -g', kspaceRSI, mrData2)
-#     else: 
-#         print(f"Run_gpu = {run_gpu}")
-#         reconMrsi = bart(1, 'nufft -i -t', kspaceRSI, mrData2)
-#     return reconMrsi
-
+FOV = 224  # Field of View in mm (from run.py)
 
 def shift_trajectory(kx, ky):
     """
@@ -101,7 +34,6 @@ def shift_trajectory(kx, ky):
     ky_shift = ky - ky_at_kx0
     
     return kx_shift, ky_shift
-
 
 def rotate_traj(kx, ky, n_rotation=79):
     """
@@ -181,29 +113,28 @@ def complex_traj(kspaceTrj):
     # Flatten to 1D
     return ktraj_complex.ravel()
 
-def plot_trajs(kspaceTrj):
-    """
-    Plot all trajectories from the rotated k-space data.
+# def plot_trajs(kspaceTrj):
+#     """
+#     Plot all trajectories from the rotated k-space data.
 
-    Parameters
-    ----------
-    kspaceTrj : dict
-        Dictionary with 'kxx' and 'kyy' arrays of shape (n_points, n_rotation).
-    """
-    kxx = kspaceTrj['kxx']
-    kyy = kspaceTrj['kyy']
+#     Parameters
+#     ----------
+#     kspaceTrj : dict
+#         Dictionary with 'kxx' and 'kyy' arrays of shape (n_points, n_rotation).
+#     """
+#     kxx = kspaceTrj['kxx']
+#     kyy = kspaceTrj['kyy']
 
-    plt.figure(figsize=(6, 6))
-    for i in range(kxx.shape[1]):
-        plt.plot(kxx[:, i], kyy[:, i], lw=0.8)
+#     plt.figure(figsize=(6, 6))
+#     for i in range(kxx.shape[1]):
+#         plt.plot(kxx[:, i], kyy[:, i], lw=0.8)
 
-    plt.xlabel("kx")
-    plt.ylabel("ky")
-    plt.axis("equal")
-    plt.title("Rotated k-space Trajectories")
-    plt.grid(True)
-    plt.show()
-
+#     plt.xlabel("kx")
+#     plt.ylabel("ky")
+#     plt.axis("equal")
+#     plt.title("Rotated k-space Trajectories")
+#     plt.grid(True)
+#     plt.show()
 
 
 def max_rotated_deriv(dx, dy, ddx, ddy, n_rotation):
@@ -351,7 +282,7 @@ def demo_trajectory_utilities(kx, ky, save_path, run_folder=None, n_rotations=79
         print(f"   Generated rosette trajectory with shape: {rosette_traj.shape}")
         
         # Interpolate k-space data
-        FOV = 224  # Field of View in mm (from run.py)
+        
         kspace_sampled = fast_kspace_interpolation_v3(kspace_data, rosette_traj, FOV)
         
         # Prepare for BART reconstruction
