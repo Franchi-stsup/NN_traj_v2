@@ -72,8 +72,8 @@ def parse_arguments():
                        help='MSE weight in smooth loss (default: 1.0)')
     parser.add_argument('--first_deriv_weight', type=float, default=0.001,
                        help='First derivative weight in smooth loss (default: 0.001)')
-    parser.add_argument('--second_deriv_weight', type=float, default=0.0005,
-                       help='Second derivative weight in smooth loss (default: 0.0005)')
+    parser.add_argument('--second_deriv_weight', type=float, default=0.001,
+                       help='Second derivative weight in smooth loss (default: 0.001)')
     
     # File paths
     timestamp = time.strftime("%Y%m%d-%H%M%S")
