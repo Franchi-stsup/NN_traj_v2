@@ -57,7 +57,7 @@ def structural_similarity_index(ground_truth: np.ndarray, reconstructed: np.ndar
         data_range: Dynamic range of the data (max - min). If None, computed automatically.
         
     Returns:
-        float: SSIM value between -1 and 1 (higher is better, 1 is perfect)
+        float: SSIM value between 0 and 1 (higher is better, 1 is perfect) -1 is error
     """
     try:
         # Ensure same shape
@@ -83,7 +83,6 @@ def structural_similarity_index(ground_truth: np.ndarray, reconstructed: np.ndar
     except Exception as e:
         logger.error(f"Error calculating SSIM: {e}")
         return -1.0
-
 
 def pearson_correlation_coefficient(ground_truth: np.ndarray, reconstructed: np.ndarray) -> float:
     """
@@ -120,7 +119,6 @@ def pearson_correlation_coefficient(ground_truth: np.ndarray, reconstructed: np.
         logger.error(f"Error calculating Pearson correlation: {e}")
         return 0.0
 
-
 def calculate_all_metrics(ground_truth: np.ndarray, reconstructed: np.ndarray) -> dict:
     """
     Calculate all available metrics between ground truth and reconstructed images.
@@ -142,7 +140,6 @@ def calculate_all_metrics(ground_truth: np.ndarray, reconstructed: np.ndarray) -
     
     #logger.info("Metrics calculation completed")
     return metrics
-
 
 def print_metrics_summary(metrics: dict) -> None:
     """

@@ -83,7 +83,7 @@ def fast_kspace_interpolation_v2(kspace_data, rosette_traj, FoV, Kmax_res):
     
     return kspace_sampled
 
-def fast_kspace_interpolation_v3(kspace_data, rosette_traj, FoV): #, Kmax_res):
+def fast_kspace_interpolation_v3(kspace_data, rosette_traj, FoV=224): #, Kmax_res):
     """
     Optimized griddata with spatial filtering
     """

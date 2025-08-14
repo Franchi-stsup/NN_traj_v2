@@ -11,6 +11,8 @@ from datetime import datetime
 from src.network import get_device
 from src.train import inference_single_sample
 
+GAMMA = 42.575575  # Gyromagnetic ratio in MHz/T
+DT_NN = 0.005/1.28
 device = get_device()
 
 
@@ -95,7 +97,7 @@ def visualize_results(model, dataset, num_samples=3, save_path='plots', run_fold
             prediction = model(input_signal).cpu().squeeze(0)
             
             # Time vector for output (128 points at 5ms intervals)
-            time_output = np.linspace(0, 0.64, 128)
+            time_output = np.linspace(0, 0.5, len(target[0].numpy()))
             
             # Plot kx
             axes[0, i].plot(time_output, target[0].numpy(), 'b-', label='Target kx', linewidth=2)
@@ -150,7 +152,7 @@ def plot_circle(model, dataset, sample_idx=0, save_path='plots', run_folder=None
         # plt.show()  # Disabled - only save figures
 
 
-def calculate_derivatives(kx, ky, dt=0.005):
+def calculate_derivatives(kx, ky, dt=DT_NN):
     """
     Calculate first and second derivatives of kx and ky
     
@@ -169,11 +171,19 @@ def calculate_derivatives(kx, ky, dt=0.005):
     # Second derivatives (acceleration)
     d2kx_dt2 = np.gradient(dkx_dt, dt)  # d²x/dt²
     d2ky_dt2 = np.gradient(dky_dt, dt)  # d²y/dt²
-    
+
     # Calculate magnitude of velocity and acceleration
     velocity_magnitude = np.sqrt(dkx_dt**2 + dky_dt**2)
     acceleration_magnitude = np.sqrt(d2kx_dt2**2 + d2ky_dt2**2)
     
+
+    # Divide by gamma to convert to physical units (Hz)
+    dkx_dt /= GAMMA
+    dky_dt /= GAMMA
+    d2kx_dt2 /= GAMMA
+    d2ky_dt2 /= GAMMA
+    velocity_magnitude /= GAMMA
+    acceleration_magnitude /= GAMMA
     return {
         'dkx_dt': dkx_dt,
         'dky_dt': dky_dt,
@@ -184,7 +194,7 @@ def calculate_derivatives(kx, ky, dt=0.005):
     }
 
 
-def plot_derivatives(kx_target, ky_target, kx_pred, ky_pred, dt=0.005, save_path='plots', run_folder=None):
+def plot_derivatives(kx_target, ky_target, kx_pred, ky_pred, dt=DT_NN, save_path='plots', run_folder=None):
     """
     Plot derivatives of target vs predicted trajectories
     
@@ -205,7 +215,7 @@ def plot_derivatives(kx_target, ky_target, kx_pred, ky_pred, dt=0.005, save_path
     pred_derivs = calculate_derivatives(kx_pred, ky_pred, dt)
     
     # Time vector
-    time = np.linspace(0, 0.64, len(kx_target))
+    time = np.linspace(0, 0.5, len(kx_target))  # 128 points at 5ms intervals
     
     # Create subplots
     fig, axes = plt.subplots(3, 2, figsize=(15, 12))
@@ -304,6 +314,122 @@ def plot_derivatives(kx_target, ky_target, kx_pred, ky_pred, dt=0.005, save_path
     return target_derivs, pred_derivs
 
 
+def plot_trajectory_shift_comparison(kx, ky, kx_shifted, ky_shifted, save_path, filename='trajectory_shift_demo.png'):
+    """
+    Plot comparison between original and shifted trajectories
+    
+    Args:
+        kx, ky: original trajectory coordinates
+        kx_shifted, ky_shifted: shifted trajectory coordinates
+        save_path: directory to save the plot
+        filename: name of the output file
+    
+    Returns:
+        str: path to saved plot
+    """
+    plt.figure(figsize=(12, 5))
+    
+    plt.subplot(1, 2, 1)
+    plt.plot(kx, ky, 'b-', linewidth=2, label='Original')
+    plt.xlabel('kx')
+    plt.ylabel('ky')
+    plt.title('Original Trajectory')
+    plt.grid(True, alpha=0.3)
+    plt.axis('equal')
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(kx_shifted, ky_shifted, 'r-', linewidth=2, label='Shifted')
+    plt.xlabel('kx')
+    plt.ylabel('ky')
+    plt.title('Shifted Trajectory')
+    plt.grid(True, alpha=0.3)
+    plt.axis('equal')
+    
+    plt.tight_layout()
+    plot_path = os.path.join(save_path, filename)
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    return plot_path
+
+
+def plot_rotated_trajectories(kSpaceTrj, save_path, filename='trajectory_rotations_demo.png'):
+    """
+    Plot rotated trajectories
+    
+    Args:
+        kSpaceTrj: dictionary with 'kxx' and 'kyy' arrays
+        save_path: directory to save the plot
+        filename: name of the output file
+    
+    Returns:
+        str: path to saved plot
+    """
+    plt.figure(figsize=(8, 8))
+    kxx = kSpaceTrj['kxx']
+    kyy = kSpaceTrj['kyy']
+    n_rotations = kxx.shape[1]
+    
+    for i in range(kxx.shape[1]):
+        plt.plot(kxx[:, i], kyy[:, i], lw=0.8, alpha=0.7)
+    
+    plt.xlabel("kx")
+    plt.ylabel("ky")
+    plt.axis("equal")
+    plt.title(f"Rotated k-space Trajectories (n={n_rotations})")
+    plt.grid(True, alpha=0.3)
+    
+    plot_path = os.path.join(save_path, filename)
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    return plot_path
+
+
+def plot_trajectory_utilities_combined(kx, ky, kx_shifted, ky_shifted, kSpaceTrj, save_path, filename='trajectory_utilities_combined.png'):
+    """
+    Plot combined view of original, shifted, and rotated trajectories
+    
+    Args:
+        kx, ky: original trajectory coordinates
+        kx_shifted, ky_shifted: shifted trajectory coordinates
+        kSpaceTrj: dictionary with 'kxx' and 'kyy' arrays for rotated trajectories
+        save_path: directory to save the plot
+        filename: name of the output file
+    
+    Returns:
+        str: path to saved plot
+    """
+    plt.figure(figsize=(10, 8))
+    
+    kxx = kSpaceTrj['kxx']
+    kyy = kSpaceTrj['kyy']
+    
+    # Plot original
+    plt.plot(kx, ky, 'b-', linewidth=3, label='Original', alpha=0.8)
+    
+    # Plot shifted
+    plt.plot(kx_shifted, ky_shifted, 'r-', linewidth=2, label='Shifted', alpha=0.8)
+    
+    # Plot a few rotated versions
+    for i in range(0, min(5, kxx.shape[1])):
+        plt.plot(kxx[:, i], kyy[:, i], '--', linewidth=1, alpha=0.5, 
+                label=f'Rotated {i+1}' if i < 3 else None)
+    
+    plt.xlabel("kx")
+    plt.ylabel("ky")
+    plt.axis("equal")
+    plt.title("Trajectory Utilities Demo: Original, Shifted, and Rotated")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plot_path = os.path.join(save_path, filename)
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    return plot_path
+
+
 def plot_pretrained_demo(model, save_path='plots', run_folder=None):
     """Plot the predicted circle from pretrained model demo"""
     # Use existing run folder or create plots directory
@@ -312,7 +438,8 @@ def plot_pretrained_demo(model, save_path='plots', run_folder=None):
     os.makedirs(run_folder, exist_ok=True)
     
     # Create some test input (simulated time signal)
-    test_input = torch.linspace(0, 0.64, 128) + 0.01 * torch.randn(128)
+    test_input = torch.linspace(0, 0.64, 128 + 1) # + 0.01 * torch.randn(128)
+    test_input = test_input[:-1]  # Remove last point to match output length
     
     # Single sample inference
     prediction = inference_single_sample(model, test_input)
@@ -359,7 +486,7 @@ def analyze_model_predictions(model, dataset, save_path='plots', run_folder=None
         # Plot derivatives
         target_derivs, pred_derivs = plot_derivatives(kx_target, ky_target, 
                                                     kx_pred, ky_pred, 
-                                                    dt=0.005, save_path=save_path, 
+                                                    dt=DT_NN, save_path=save_path, 
                                                     run_folder=run_folder)
     
     return target_derivs, pred_derivs
