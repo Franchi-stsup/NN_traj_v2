@@ -1,15 +1,15 @@
 # Ignore model files
-*.pth
+# *.pth
 
 # Ignore image files
-*.png
+# *.png
 
 # Ignore model and plot directories
 /models/
-/models_cnn02/
+# /models_cnn02/
 /plots/
 /plots_bart/
-/plots_cnn02/
+# /plots_cnn02/
 
 # Python cache files
 __pycache__/
