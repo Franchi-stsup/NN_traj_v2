@@ -18,6 +18,7 @@ import logging
 from src.bart_interface import bart
 from skimage.transform import resize
 
+DURATION = 0.5  # Duration of the trajectory in seconds
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

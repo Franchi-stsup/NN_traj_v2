@@ -13,6 +13,7 @@ from src.train import inference_single_sample
 
 GAMMA = 42.575575  # Gyromagnetic ratio in MHz/T
 DT_NN = 0.005/1.28
+DURATION = 0.5  # Duration of the trajectory in seconds
 device = get_device()
 
 
@@ -22,6 +23,20 @@ def create_run_folder(save_path='plots', **kwargs):
     
     Args:
         save_path: Base path for plots
+        **kwargs: Training parameters (num_epochs, learning_rate, batch_size, etc.)
+    
+    Returns:
+        str: Path to the created subfolder
+    """
+    return create_structured_subfolder(save_path, None, **kwargs)
+
+def create_structured_subfolder(save_path='plots', mode_suffix=None, **kwargs):
+    """
+    Create a structured subfolder with parameters and timestamp
+    
+    Args:
+        save_path: Base path for plots
+        mode_suffix: Optional suffix for the mode (e.g., 'eval', 'demo')
         **kwargs: Training parameters (num_epochs, learning_rate, batch_size, etc.)
     
     Returns:
@@ -44,6 +59,17 @@ def create_run_folder(save_path='plots', **kwargs):
         params.append("sched")
     if 'use_smooth_loss' in kwargs and kwargs['use_smooth_loss']:
         params.append("smooth")
+        # Add smooth loss weights if present
+        if 'mse_weight' in kwargs:
+            params.append(f"mse{kwargs['mse_weight']}")
+        if 'first_deriv_weight' in kwargs:
+            params.append(f"fd{kwargs['first_deriv_weight']}")
+        if 'second_deriv_weight' in kwargs:
+            params.append(f"sd{kwargs['second_deriv_weight']}")
+    
+    # Add mode suffix if provided
+    if mode_suffix:
+        params.append(mode_suffix)
     
     # Create folder name
     if params:
@@ -97,7 +123,7 @@ def visualize_results(model, dataset, num_samples=3, save_path='plots', run_fold
             prediction = model(input_signal).cpu().squeeze(0)
             
             # Time vector for output (128 points at 5ms intervals)
-            time_output = np.linspace(0, 0.5, len(target[0].numpy()))
+            time_output = np.linspace(0, DURATION, len(target[0].numpy()))
             
             # Plot kx
             axes[0, i].plot(time_output, target[0].numpy(), 'b-', label='Target kx', linewidth=2)
@@ -215,7 +241,7 @@ def plot_derivatives(kx_target, ky_target, kx_pred, ky_pred, dt=DT_NN, save_path
     pred_derivs = calculate_derivatives(kx_pred, ky_pred, dt)
     
     # Time vector
-    time = np.linspace(0, 0.5, len(kx_target))  # 128 points at 5ms intervals
+    time = np.linspace(0, DURATION, len(kx_target))  # 128 points at 5ms intervals
     
     # Create subplots
     fig, axes = plt.subplots(3, 2, figsize=(15, 12))
@@ -438,7 +464,7 @@ def plot_pretrained_demo(model, save_path='plots', run_folder=None):
     os.makedirs(run_folder, exist_ok=True)
     
     # Create some test input (simulated time signal)
-    test_input = torch.linspace(0, 0.64, 128 + 1) # + 0.01 * torch.randn(128)
+    test_input = torch.linspace(0, DURATION, 128 + 1) # + 0.01 * torch.randn(128)
     test_input = test_input[:-1]  # Remove last point to match output length
     
     # Single sample inference

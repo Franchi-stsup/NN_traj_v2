@@ -32,6 +32,7 @@ SLEW_RATE = 200  # Maximum slew rate
 GAMMA = 42.575575  # Gyromagnetic ratio in MHz/T
 FOV = 224  # Field of View in mm
 DT_NN = 100 * 0.005/128  # Time step for neural network predictions
+DURATION = 0.5  # Duration of the trajectory in seconds
 
 def keyboard_listener():
     """Background thread to listen for keyboard input"""
@@ -716,8 +717,8 @@ def demo_pretrained_usage(model_path='circle_cnn_model.pth', load_dir='models', 
         return None
     
     # Create some test input (simulated time signal)
-    test_input = torch.linspace(0, 0.5, 128) # + 0.01 * torch.randn(128)
-    
+    test_input = torch.linspace(0, DURATION, 128) # + 0.01 * torch.randn(128)
+
     # Single sample inference
     prediction = inference_single_sample(model, test_input)
     print(f"Prediction shape: {prediction.shape}")  # Should be (2, 128)

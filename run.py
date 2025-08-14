@@ -23,6 +23,7 @@ from src.bart_utils import run_bart_nufft, build_para, rescale_recon_img, plot_c
 RES = 50   # Resolution in pixels
 FOV = 224  # Field of View in mm
 KMAX_RES = RES / (FOV * 1e-3) / 2.0  # kmax in 1/mm, assuming FOV is in mm
+DURATION = 0.5  # Duration of the trajectory in seconds
 
 def parse_arguments():
     """Parse command line arguments"""
@@ -31,7 +32,7 @@ def parse_arguments():
     # Main execution modes
     parser.add_argument('--mode', type=str, default='all', 
                        choices=['train', 'evaluate', 'plot', 'demo', 'all'],
-                       help='Execution mode: train, evaluate, plot, demo, or all')
+                       help='Execution mode: train (training only), evaluate (full evaluation with plots and analysis), plot (derivative analysis only), demo (pretrained model demo), or all (complete pipeline)')
     
     # Model parameters
     parser.add_argument('--input_length', type=int, default=128,
@@ -56,8 +57,8 @@ def parse_arguments():
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=32,
                        help='Batch size (default: 32)')
-    parser.add_argument('--num_epochs', type=int, default=100,
-                       help='Number of training epochs (default: 100)')
+    parser.add_argument('--num_epochs', type=int, default=200,
+                       help='Number of training epochs (default: 200)')
     parser.add_argument('--learning_rate', type=float, default=1e-3,
                        help='Learning rate (default: 1e-3)')
     parser.add_argument('--use_scheduler', action='store_true',
@@ -72,9 +73,9 @@ def parse_arguments():
                        help='MSE weight in smooth loss (default: 1.0)')
     parser.add_argument('--first_deriv_weight', type=float, default=0.001,
                        help='First derivative weight in smooth loss (default: 0.001)')
-    parser.add_argument('--second_deriv_weight', type=float, default=0.001,
-                       help='Second derivative weight in smooth loss (default: 0.001)')
-    
+    parser.add_argument('--second_deriv_weight', type=float, default=0.002,
+                       help='Second derivative weight in smooth loss (default: 0.002)')
+
     # File paths
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     parser.add_argument('--model_name', type=str, default=f'circle_cnn_model_{timestamp}.pth',
@@ -268,9 +269,43 @@ def run_training(args):
     
     return model, train_dataset, val_dataset, run_folder, saved_model_path
 
+def create_run_folder(args, mode_suffix="eval"):
+    """Create a run folder for standalone modes like evaluate, plot, demo"""
+    from datetime import datetime
+    from src.plots import create_structured_subfolder
+    
+    # Create parameters dict similar to training
+    params = {
+        'num_epochs': args.num_epochs,
+        'learning_rate': args.learning_rate,
+        'batch_size': args.batch_size,
+        'use_scheduler': args.use_scheduler,
+        'use_smooth_loss': args.use_smooth_loss and not args.no_smooth_loss
+    }
+    
+    # Add smooth loss weights if used
+    if args.use_smooth_loss and not args.no_smooth_loss:
+        params.update({
+            'mse_weight': args.mse_weight,
+            'first_deriv_weight': args.first_deriv_weight,
+            'second_deriv_weight': args.second_deriv_weight
+        })
+    
+    # Add mode suffix to distinguish from training runs
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create the subfolder
+    run_folder = create_structured_subfolder(args.plot_dir, mode_suffix, **params)
+    return run_folder
+
 def run_evaluation(args, model=None, val_dataset=None, run_folder=None):
-    """Run the evaluation pipeline"""
+    """Run the evaluation pipeline with comprehensive analysis and plotting"""
     print("=== EVALUATION MODE ===")
+    
+    # Create run folder if not provided (standalone evaluation mode)
+    if run_folder is None:
+        run_folder = create_run_folder(args, "eval")
+        print(f"Created evaluation folder: {run_folder}")
     
     # Load model if not provided
     if model is None:
@@ -293,20 +328,30 @@ def run_evaluation(args, model=None, val_dataset=None, run_folder=None):
             noise_level=args.noise_level
         )
     
-    # Visualize results
+    # Comprehensive evaluation with all visualization and analysis
     print("Visualizing results...")
     visualize_results(model, val_dataset, 
                      num_samples=args.num_plot_samples, 
                      save_path=args.plot_dir,
                      run_folder=run_folder)
     
+    print("Plotting circle trajectories...")
     plot_circle(model, val_dataset, save_path=args.plot_dir, run_folder=run_folder)
+    
+    print("Analyzing predictions and derivatives...")
+    analyze_model_predictions(model, val_dataset, save_path=args.plot_dir, run_folder=run_folder)
     
     return model, val_dataset
 
 def run_plotting(args, model=None, val_dataset=None, run_folder=None):
-    """Run derivative analysis and plotting"""
+    """Run derivative analysis and plotting (standalone mode - evaluation mode now includes all plotting)"""
     print("=== PLOTTING MODE ===")
+    print("Note: For comprehensive evaluation including all plots, use --mode evaluate instead")
+    
+    # Create run folder if not provided (standalone plotting mode)
+    if run_folder is None:
+        run_folder = create_run_folder(args, "plot")
+        print(f"Created plotting folder: {run_folder}")
     
     # Load model if not provided
     if model is None:
@@ -329,12 +374,17 @@ def run_plotting(args, model=None, val_dataset=None, run_folder=None):
             noise_level=args.noise_level
         )
     
-    # Analyze predictions and derivatives
+    # Analyze predictions and derivatives (derivative analysis only)
     analyze_model_predictions(model, val_dataset, save_path=args.plot_dir, run_folder=run_folder)
 
 def run_demo(args, run_folder=None, model=None, model_path=None):
     """Run pretrained model demonstration with trajectory utilities"""
     print("=== DEMO MODE ===")
+    
+    # Create run folder if not provided and model is not from training pipeline
+    if run_folder is None and model is None:
+        run_folder = create_run_folder(args, "demo")
+        print(f"Created demo folder: {run_folder}")
     
     # If model is provided directly, use it (from training pipeline)
     if model is not None:
@@ -343,7 +393,7 @@ def run_demo(args, run_folder=None, model=None, model_path=None):
         model.eval()
         with torch.no_grad():
             # Create test input
-            test_input = torch.linspace(0, 0.5, 128 + 1) #+ 0.01 * torch.randn(128)
+            test_input = torch.linspace(0, DURATION, 128 + 1) #+ 0.01 * torch.randn(128)
             test_input = test_input[:-1]  # Remove last point to match output length
             test_input = test_input.unsqueeze(0).to(next(model.parameters()).device)
             
@@ -388,7 +438,7 @@ def run_demo(args, run_folder=None, model=None, model_path=None):
             model.eval()
             with torch.no_grad():
                 # Create test input
-                test_input = torch.linspace(0, 0.5, 128) #+ 0.01 * torch.randn(128)
+                test_input = torch.linspace(0, DURATION, 128) #+ 0.01 * torch.randn(128)
                 test_input = test_input.unsqueeze(0).to(next(model.parameters()).device)
                 
                 # Get prediction
@@ -476,8 +526,8 @@ def main():
         saved_model_name = os.path.basename(saved_model_path) if saved_model_path else args.model_name
         
         if model is not None:
+            # Use run_evaluation which now includes all plotting/analysis
             run_evaluation(args, model, val_dataset, run_folder)
-            run_plotting(args, model, val_dataset, run_folder)
             run_demo(args, run_folder, model=model)  # Pass the trained model directly
     
     print("\n=== PIPELINE COMPLETED ===")
@@ -488,12 +538,14 @@ def main():
     print("\n=== HOW TO REUSE THIS MODEL ===")
     if args.use_cnn_02:
         print(f"1. Load model: python run.py --mode demo --use_cnn_02 --model_name {saved_model_name}")
-        print(f"2. Evaluate: python run.py --mode evaluate --use_cnn_02 --model_name {saved_model_name}")
-        print(f"3. Retrain: python run.py --mode train --use_cnn_02 --pretrained_model {saved_model_name}")
+        print(f"2. Full evaluation (with all plots and analysis): python run.py --mode evaluate --use_cnn_02 --model_name {saved_model_name}")
+        print(f"3. Derivative analysis only: python run.py --mode plot --use_cnn_02 --model_name {saved_model_name}")
+        print(f"4. Retrain: python run.py --mode train --use_cnn_02 --pretrained_model {saved_model_name}")
     else :
         print(f"1. Load model: python run.py --mode demo --model_name {saved_model_name}")
-        print(f"2. Evaluate: python run.py --mode evaluate --model_name {saved_model_name}")
-        print(f"3. Retrain: python run.py --mode train --pretrained_model {saved_model_name}")
+        print(f"2. Full evaluation (with all plots and analysis): python run.py --mode evaluate --model_name {saved_model_name}")
+        print(f"3. Derivative analysis only: python run.py --mode plot --model_name {saved_model_name}")
+        print(f"4. Retrain: python run.py --mode train --pretrained_model {saved_model_name}")
 
 
 if __name__ == "__main__":

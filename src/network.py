@@ -8,7 +8,7 @@ import torch.nn as nn
 import numpy as np
 from torch.utils.data import Dataset
 from src.bart_interface import bart # Assuming BART is installed and accessible
-
+DURATION = 0.5
 # Check for GPU availability
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -35,10 +35,10 @@ class CircleDataset(Dataset):
         # Time vectors - both input and output have same temporal resolution
         self.dt = 0.005  # 5ms resolution for both input and output
 
-        self.input_time = torch.linspace(0, 0.64, input_length+1)
+        self.input_time = torch.linspace(0, DURATION, input_length+1)
         # get rid of the last point to match output length
         self.input_time = self.input_time[:-1]
-        self.output_time = torch.linspace(0, 0.64, output_length+1)
+        self.output_time = torch.linspace(0, DURATION, output_length+1)
         self.output_time = self.output_time[:-1]  # Ensure same length
 
     def __len__(self):
@@ -50,8 +50,8 @@ class CircleDataset(Dataset):
         input_signal = self.input_time # + self.noise_level * torch.randn(self.input_length)
         
         # Generate target circle coordinates
-        # One full circle over 640ms
-        angle = 2 * np.pi * self.output_time / 0.64
+        # One full circle over 500ms
+        angle = 2 * np.pi * self.output_time / DURATION
         kx_target = self.radius * torch.cos(angle)
         ky_target = self.radius * torch.sin(angle)
         tmpx = kx_target
