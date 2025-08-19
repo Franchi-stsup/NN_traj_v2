@@ -50,7 +50,9 @@ class BartNufft(torch.autograd.Function):
         
         # Call BART's ADJOINT NUFFT using the -a flag
         # This is the key step for calculating the gradient w.r.t the image
-        grad_image_np = bart(1, "nufft -a", grad_kspace_np, traj_np)
+        # print(f"Calling BART adjoint NUFFT with kspace shape: {traj_np.shape}, trajectory shapes: kxx={kxx.shape}, kyy={kyy.shape}")
+        # print(f"Grad image shape: {grad_kspace_np.shape}")
+        grad_image_np = bart(1, "nufft -a -t", grad_kspace_np, traj_np)
         
         # Convert the gradient on the image back to a PyTorch tensor
         grad_image_tensor = torch.from_numpy(grad_image_np).to(grad_output_kspace.device)

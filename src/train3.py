@@ -13,22 +13,20 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
 
-from src.network import CircleCNN, CircleCNN_02,FrequencyAwareNet,TrajectoryUNet, get_device
-# from src.network_utils import shift_trajectory, rotate_traj
+from src.network import CircleCNN, CircleCNN_02, get_device
+from src.network_utils import shift_trajectory, rotate_traj
 from src.bart_interface import bart
 from src.bart_config import create_default_config
 from src.bart_interpolation_fct import fast_kspace_interpolation_v3_torch
 from src.bart_utils import run_bart_nufft, build_para, rescale_recon_img
-from src.kb_nufft_recon import run_kb_nufft
-# from src.bart_metrics import structural_similarity_index, mean_squared_error
+from src.bart_metrics import structural_similarity_index, mean_squared_error
 
 GRAD_MAX = 135  # Maximum gradient 
-SLEW_RATE = 280  # Maximum slew rate 
+SLEW_RATE = 250  # Maximum slew rate 
 GAMMA = 42.575575  # Gyromagnetic ratio in MHz/T
 FOV = 224  # Field of View in mm
 DT_NN = 100 * 0.005/128  # Time step for neural network predictions
 DURATION = 0.5  # Duration of the trajectory in seconds
-NUFFT_TYPE = 'kbnufft'  # either 'bart' or 'kbnufft'
 
 device = get_device()
 
@@ -45,39 +43,16 @@ class SmoothLoss(nn.Module):
         self.dt = dt
         self.mse_loss = nn.MSELoss()
         
-    # def compute_derivatives_torch(self, tensor):
-    #     """
-    #     Compute first and second derivatives using torch operations
-    #     tensor shape: (batch_size, 2, sequence_length)
-    #     """
-    #     # First derivative using finite differences
-    #     first_deriv = (tensor[:, :, 1:] - tensor[:, :, :-1]) / self.dt
-        
-    #     # Second derivative
-    #     second_deriv = (first_deriv[:, :, 1:] - first_deriv[:, :, :-1]) / self.dt
-        
-    #     return first_deriv, second_deriv
     def compute_derivatives_torch(self, tensor):
         """
-        Compute first and second derivatives using torch operations with central differences
-        and periodic wrap-around to preserve the same number of points.
+        Compute first and second derivatives using torch operations
         tensor shape: (batch_size, 2, sequence_length)
         """
-        # First derivative using second-order central differences with periodic wrap-around
-        # Get tensor_{i+1} and tensor_{i-1} for all points using periodic wrap-around
-        tensor_plus_1 = torch.roll(tensor, shifts=-1, dims=2)  # shift along sequence dimension
-        tensor_minus_1 = torch.roll(tensor, shifts=1, dims=2)   # shift along sequence dimension
+        # First derivative using finite differences
+        first_deriv = (tensor[:, :, 1:] - tensor[:, :, :-1]) / self.dt
         
-        # Apply the second-order central difference formula for first derivative
-        first_deriv = (tensor_plus_1 - tensor_minus_1) / (2 * self.dt)
-        
-        # Second derivative using central differences on the first derivative
-        # Apply periodic wrap-around to first derivative
-        first_deriv_plus_1 = torch.roll(first_deriv, shifts=-1, dims=2)
-        first_deriv_minus_1 = torch.roll(first_deriv, shifts=1, dims=2)
-        
-        # Second derivative using central differences
-        second_deriv = (first_deriv_plus_1 - first_deriv_minus_1) / (2 * self.dt)
+        # Second derivative
+        second_deriv = (first_deriv[:, :, 1:] - first_deriv[:, :, :-1]) / self.dt
         
         return first_deriv, second_deriv
     
@@ -92,20 +67,12 @@ class SmoothLoss(nn.Module):
         pred_first_deriv, pred_second_deriv = self.compute_derivatives_torch(predicted)
         target_first_deriv, target_second_deriv = self.compute_derivatives_torch(target)
 
-        # Divide it by the gyromagnetic ratio
-
+        # Divide by the gyromagnetic ratio
         pred_first_deriv = pred_first_deriv / GAMMA
         pred_second_deriv = pred_second_deriv / GAMMA
         target_first_deriv = target_first_deriv / GAMMA
         target_second_deriv = target_second_deriv / GAMMA
 
-
-        # First derivative penalty: penalize maximum absolute derivative
-        # first_deriv_penalty = torch.max(torch.abs(pred_first_deriv))
-        
-        # Second derivative penalty: penalize maximum absolute second derivative
-        # second_deriv_penalty = torch.max(torch.abs(pred_second_deriv))
-        
         # Optional: Also penalize difference between predicted and target derivatives
         first_deriv_mse = self.mse_loss(pred_first_deriv, target_first_deriv)
         second_deriv_mse = self.mse_loss(pred_second_deriv, target_second_deriv)
@@ -119,8 +86,6 @@ class SmoothLoss(nn.Module):
         loss_components = {
             'total_loss': total_loss,
             'mse_loss': mse_loss,
-            # 'first_deriv_penalty': first_deriv_penalty,
-            # 'second_deriv_penalty': second_deriv_penalty,
             'first_deriv_mse': first_deriv_mse,
             'second_deriv_mse': second_deriv_mse
         }
@@ -164,11 +129,17 @@ class BartNufftRecon(torch.autograd.Function):
         para = build_para(config)
         
         # Use run_bart_nufft which handles all the proper data formatting
-        # print(f"Calling run_bart_nufft with kspace shape: {kspace_np.shape}, trajectory shapes: kxx={traj_np['kxx'].shape}, kyy={traj_np['kyy'].shape}")
+        print(f"Calling run_bart_nufft with kspace shape: {kspace_np.shape}, trajectory shapes: kxx={traj_np['kxx'].shape}, kyy={traj_np['kyy'].shape}")
         
         try:
             recon_image_np = run_bart_nufft(kspace_np, traj_np, para, run_gpu)
-            # print(f"BART reconstruction successful, output shape: {recon_image_np.shape}")
+            print(f"BART reconstruction successful, output shape: {recon_image_np.shape}")
+            # Plot the reconstructed image for debugging
+            plt.imshow(np.abs(recon_image_np), cmap='jet')
+            plt.colorbar()
+            plt.title('Reconstructed Image from BART NUFFT Recon class')
+            plt.savefig('test/Recon_img_BartNufftRecon.png')
+            plt.close()
 
         except Exception as e:
             print(f"Warning: run_bart_nufft failed: {e}")
@@ -192,10 +163,10 @@ class BartNufftRecon(torch.autograd.Function):
         # Convert tensors to NumPy arrays
         grad_image_np = grad_output_image.detach().cpu().numpy()
         
-        # print(f"Grad output image shape: {grad_image_np.shape}")
+        print(f"Grad output image shape: {grad_image_np.shape}")
         # grad_image_np = kspace_tensor.detach().cpu().numpy()
 
-        # print(f"Grad output image shape / kspace: {grad_image_np.shape}")
+        print(f"Grad output image shape / kspace: {grad_image_np.shape}")
         # Convert trajectory to numpy
         traj_np = {
             'kxx': trajectory_dict['kxx'].detach().cpu().numpy(),
@@ -229,12 +200,12 @@ class BartNufftRecon(torch.autograd.Function):
                 bart_cmd += " -g"
             
             # Call BART's adjoint NUFFT with properly formatted trajectory
-            # print(f"Calling BART adjoint NUFFT with command: {bart_cmd}")
-            # print(f"Calling BART adjoint NUFFT with kspace shape: {kspaceRSI.shape}, trajectory shapes: kxx={kxx.shape}, kyy={kyy.shape}")
-            # print(f"Grad image shape: {mrData2.shape}")
+            print(f"Calling BART adjoint NUFFT with command: {bart_cmd}")
+            print(f"Calling BART adjoint NUFFT with kspace shape: {kspaceRSI.shape}, trajectory shapes: kxx={kxx.shape}, kyy={kyy.shape}")
+            print(f"Grad image shape: {mrData2.shape}")
 
             grad_kspace_np = bart(1, bart_cmd, kspaceRSI, mrData2.squeeze()) #, kspaceRsi)
-            # print(f"BART adjoint operation successful, output shape: {grad_kspace_np.shape}")
+            print(f"BART adjoint operation successful, output shape: {grad_kspace_np.shape}")
             # Convert the gradient back to a PyTorch tensor
             grad_kspace_tensor = torch.from_numpy(grad_kspace_np).to(grad_output_image.device)
 
@@ -401,55 +372,20 @@ class BartLoss(nn.Module):
         
         return {'kxx': kxx_tensor, 'kyy': kyy_tensor}
 
-    # def compute_derivatives_torch(self, tensor):
-    #     """
-    #     Compute first and second derivatives using torch operations
-    #     tensor shape: (batch_size, 2, sequence_length)
-    #     """
-    #     # First derivative using finite differences
-    #     first_deriv = (tensor[:, :, 1:] - tensor[:, :, :-1]) / self.dt
-        
-    #     # Second derivative
-    #     second_deriv = (first_deriv[:, :, 1:] - first_deriv[:, :, :-1]) / self.dt
-
-    #     print(f"First derivative shape: {first_deriv.shape}, Second derivative shape: {second_deriv.shape}")
-    #     print(f"First point of second derivative: {second_deriv[:, :, 0]}, Last point of second derivative: {second_deriv[:, :, -1]}")
-    #     print(f"first_deriv[1, 1, 1] {first_deriv[1, 1, 1]}, first_deriv[1, 1, 2] {first_deriv[1, 1, 2]}")
-    #     print(f"2nd derivative computation for 1st point {(first_deriv[1, 1, 1] - first_deriv[1, 1, 2]) / self.dt}")
-    #     # Divide by the gyromagnetic ratio
-    #     first_deriv = first_deriv / GAMMA
-    #     second_deriv = second_deriv / GAMMA
-    #     return first_deriv, second_deriv
-    
     def compute_derivatives_torch(self, tensor):
         """
-        Compute first and second derivatives using torch operations with central differences
-        and periodic wrap-around to preserve the same number of points.
+        Compute first and second derivatives using torch operations
         tensor shape: (batch_size, 2, sequence_length)
         """
-        # Print predicted tensor shape for debugging
-        # print(f"Predicted tensor shape: {tensor.shape}")
-
-        # First derivative using second-order central differences with periodic wrap-around
-        # Get tensor_{i+1} and tensor_{i-1} for all points using periodic wrap-around
-        tensor_plus_1 = torch.roll(tensor, shifts=-1, dims=2)  # shift along sequence dimension
-        tensor_minus_1 = torch.roll(tensor, shifts=1, dims=2)   # shift along sequence dimension
+        # First derivative using finite differences
+        first_deriv = (tensor[:, :, 1:] - tensor[:, :, :-1]) / self.dt
         
-        # Apply the second-order central difference formula for first derivative
-        first_deriv = (tensor_plus_1 - tensor_minus_1) / (2 * self.dt)
+        # Second derivative
+        second_deriv = (first_deriv[:, :, 1:] - first_deriv[:, :, :-1]) / self.dt
         
-        # Second derivative using central differences on the first derivative
-        # Apply periodic wrap-around to first derivative
-        first_deriv_plus_1 = torch.roll(first_deriv, shifts=-1, dims=2)
-        first_deriv_minus_1 = torch.roll(first_deriv, shifts=1, dims=2)
-        
-        # Second derivative using central differences
-        second_deriv = (first_deriv_plus_1 - first_deriv_minus_1) / (2 * self.dt)
         # Divide by the gyromagnetic ratio
         first_deriv = first_deriv / GAMMA
         second_deriv = second_deriv / GAMMA
-        # print(f"2nd derivative computation for 1st point ddx {second_deriv[:, :, 0]}")
-        # print(f"2nd derivative computation for last point {second_deriv[:, :, -1]}")
         return first_deriv, second_deriv
     
     def max_rotate_deriv(self, predicted, n_rotation=79):
@@ -464,7 +400,7 @@ class BartLoss(nn.Module):
         ddx = second_deriv[:, 0, :]  # (batch_size, seq_len-2)
         ddy = second_deriv[:, 1, :]  # (batch_size, seq_len-2)
 
-         # Rotation angles
+        # Rotation angles
         angles = torch.linspace(0, 2 * torch.pi, n_rotation, device=predicted.device)[:-1]
         cos_t = torch.cos(angles)  # (n_rotation,)
         sin_t = torch.sin(angles)
@@ -484,67 +420,6 @@ class BartLoss(nn.Module):
         max_ddy_val = ddy_rot.abs().max()
 
         return max_dx_val, max_dy_val, max_ddx_val, max_ddy_val
-    
-
-    # def max_rotate_deriv(self, predicted, n_rotation=79,enforce_hard_constraint=True):
-    #     """
-    #     Compute max rotated derivatives in Torch - maintains gradient flow.
-    #     Now includes derivative between last and first point for trajectory closure.
-    #     """
-    #     first_deriv, second_deriv = self.compute_derivatives_torch(predicted)
-
-    #     # Extract components
-    #     dx = first_deriv[:, 0, :]  # (batch_size, seq_len-1)
-    #     dy = first_deriv[:, 1, :]  # (batch_size, seq_len-1)
-    #     ddx = second_deriv[:, 0, :]  # (batch_size, seq_len-2)
-    #     ddy = second_deriv[:, 1, :]  # (batch_size, seq_len-2)
-
-
-    #     # # 🔥 HARD CONSTRAINT: Clamp second derivatives to NEVER exceed limits
-    #     # if enforce_hard_constraint:
-    #     #     # print(f"Before clamping - Max |ddx|: {ddx.abs().max().item():.3f}, Max |ddy|: {ddy.abs().max().item():.3f}")
-    #     #     ddx = torch.clamp(ddx, -self.SLEW_RATE, self.SLEW_RATE)
-    #     #     ddy = torch.clamp(ddy, -self.SLEW_RATE, self.SLEW_RATE)
-    #         # print(f"After clamping - Max |ddx|: {ddx.abs().max().item():.3f}, Max |ddy|: {ddy.abs().max().item():.3f}")
-    #     # ADD CLOSURE DERIVATIVES: Compute derivative between last and first point
-    #     # This ensures the trajectory forms a closed loop
-    #     batch_size, _, seq_len = predicted.shape
-        
-    #     # Derivative from last point to first point
-    #     dx_closure = (predicted[:, 0, 0] - predicted[:, 0, -1]) / self.dt / GAMMA  # (batch_size,)
-    #     dy_closure = (predicted[:, 1, 0] - predicted[:, 1, -1]) / self.dt / GAMMA  # (batch_size,)
-        
-    #     # Second derivative for closure (using last derivative and closure derivative)
-    #     ddx_closure = (dx_closure - dx[:, -1]) / self.dt  # (batch_size,)
-    #     ddy_closure = (dy_closure - dy[:, -1]) / self.dt  # (batch_size,)
-
-    #     # Combine regular derivatives with closure derivatives
-    #     # Add closure derivatives as additional points to consider
-    #     dx_extended = torch.cat([dx, dx_closure.unsqueeze(-1)], dim=-1)  # (batch_size, seq_len)
-    #     dy_extended = torch.cat([dy, dy_closure.unsqueeze(-1)], dim=-1)  # (batch_size, seq_len)
-    #     ddx_extended = torch.cat([ddx, ddx_closure.unsqueeze(-1)], dim=-1)  # (batch_size, seq_len-1)
-    #     ddy_extended = torch.cat([ddy, ddy_closure.unsqueeze(-1)], dim=-1)  # (batch_size, seq_len-1)
-
-    #     # Rotation angles
-    #     angles = torch.linspace(0, 2 * torch.pi, n_rotation, device=predicted.device)[:-1]
-    #     cos_t = torch.cos(angles)  # (n_rotation,)
-    #     sin_t = torch.sin(angles)
-
-    #     # Vectorized rotation for first derivatives (including closure)
-    #     dx_rot = dx_extended.unsqueeze(-1) * cos_t - dy_extended.unsqueeze(-1) * sin_t
-    #     dy_rot = dx_extended.unsqueeze(-1) * sin_t + dy_extended.unsqueeze(-1) * cos_t
-
-    #     # Vectorized rotation for second derivatives (including closure)
-    #     ddx_rot = ddx_extended.unsqueeze(-1) * cos_t - ddy_extended.unsqueeze(-1) * sin_t
-    #     ddy_rot = ddx_extended.unsqueeze(-1) * sin_t + ddy_extended.unsqueeze(-1) * cos_t
-
-    #     # Take max over batch, sequence, and rotations (now includes closure derivatives)
-    #     max_dx_val = dx_rot.abs().max()
-    #     max_dy_val = dy_rot.abs().max()
-    #     max_ddx_val = ddx_rot.abs().max()
-    #     max_ddy_val = ddy_rot.abs().max()
-
-    #     return max_dx_val, max_dy_val, max_ddx_val, max_ddy_val
 
     def rescale_recon_img_torch(self, recon_img: torch.Tensor, Nx: int, Ny: int, res: int) -> torch.Tensor:
         """
@@ -618,16 +493,6 @@ class BartLoss(nn.Module):
             
 
             trajectory_tensor =  kspaceTrj 
-
-            # Use BartNufftRecon for gradient-enabled reconstruction
-            nufftType = NUFFT_TYPE  # either 'bart' or 'kbnufft'
-            if nufftType == 'bart':
-                recon_img = BartNufftRecon.apply(mr_data, trajectory_tensor, self.run_gpu)
-            elif nufftType == 'kbnufft':
-                config = create_default_config()
-                para = build_para(config)
-                # print(f"Shape mr_data: {mr_data.shape}, trajectory_tensor: {trajectory_tensor['kxx'].shape}, {trajectory_tensor['kyy'].shape}")
-                recon_img = run_kb_nufft(mr_data, trajectory_tensor, para)
             
             # Use BartNufftRecon for gradient-enabled reconstruction
             recon_img = BartNufftRecon.apply(mr_data, trajectory_tensor, self.run_gpu)
@@ -761,8 +626,8 @@ class BartLoss(nn.Module):
 
     def forward(self, predicted, target):
         """
-        Custom loss with BART reconstruction, gradient penalties, and slew rate constraints.
-        Skip BART reconstruction when constraints are violated to enforce hard limits.
+        Custom loss with BART reconstruction, gradient penalties, and slew rate constraints
+        Maintains full gradient flow through BART NUFFT operations
         """
         # Compute max rotated derivatives - maintains gradients
         max_dx, max_dy, max_ddx, max_ddy = self.max_rotate_deriv(predicted)
@@ -770,44 +635,22 @@ class BartLoss(nn.Module):
         # print(f"Max rotated derivatives: max_dx={max_dx.item():.6f}, max_dy={max_dy.item():.6f}, "
         #         f"max_ddx={max_ddx.item():.6f}, max_ddy={max_ddy.item():.6f}")
         
-        # Check if constraints are violated
-        grad_violated = (max_dx > self.GRAD_MAX) or (max_dy > self.GRAD_MAX)
-        slew_violated = (max_ddx > self.SLEW_RATE) or (max_ddy > self.SLEW_RATE)
-        constraints_violated = grad_violated or slew_violated
-        
         # Gradient penalty - only penalize if above threshold
         grad_penalty = torch.relu(max_dx - self.GRAD_MAX).pow(2) + torch.relu(max_dy - self.GRAD_MAX).pow(2)
         slew_penalty = torch.relu(max_ddx - self.SLEW_RATE).pow(2) + torch.relu(max_ddy - self.SLEW_RATE).pow(2)
         
-        if constraints_violated:
-            # Skip BART reconstruction and focus only on constraint enforcement
-            print(f"Constraints violated - skipping BART reconstruction. "
-                  f"Grad: dx={max_dx.item():.2f}(max={self.GRAD_MAX}), dy={max_dy.item():.2f}(max={self.GRAD_MAX}), "
-                  f"Slew: ddx={max_ddx.item():.2f}(max={self.SLEW_RATE}), ddy={max_ddy.item():.2f}(max={self.SLEW_RATE})")
-            
-            # Use much higher weights to enforce constraints aggressively
-            constraint_weight_multiplier = 1000.0  # Aggressive constraint enforcement
-            
-            total_loss = (constraint_weight_multiplier * self.first_deriv_weight * grad_penalty + 
-                         constraint_weight_multiplier * self.second_deriv_weight * slew_penalty)
-            
-            # Set SSIM and MSE to zero since we're skipping BART reconstruction
-            ssim_loss = torch.tensor(0.0, device=predicted.device)
-            mse_loss = torch.tensor(0.0, device=predicted.device)
-            
-        else:
-            # Constraints are satisfied - compute BART loss with gradient flow maintained
-            ssim_loss, mse_loss = self.compute_bart_loss_differentiable(predicted)
-            
-            # Clamp losses to prevent extreme values but allow reasonable range
-            ssim_loss = torch.clamp(ssim_loss, 0.0, 1.0)
-            mse_loss = torch.clamp(mse_loss, 0.0, 2000.0)  # Reduced clamp limit to allow natural MSE values
-            
-            # Normal loss computation with original weights
-            total_loss = (self.first_deriv_weight * grad_penalty + 
-                         self.second_deriv_weight * slew_penalty +
-                         (self.sssim_weight * ssim_loss).pow(2) +
-                         self.mse_weight * mse_loss)
+        # Compute BART loss with gradient flow maintained
+        ssim_loss, mse_loss = self.compute_bart_loss_differentiable(predicted)
+        
+        # Clamp losses to prevent extreme values but allow reasonable range
+        ssim_loss = torch.clamp(ssim_loss, 0.0, 1.0)
+        mse_loss = torch.clamp(mse_loss, 0.0, 2000.0)  # Reduced clamp limit to allow natural MSE values
+        
+        # Total loss
+        total_loss = (self.first_deriv_weight * grad_penalty + 
+                     self.second_deriv_weight * slew_penalty +
+                     self.sssim_weight * ssim_loss +
+                     self.mse_weight * mse_loss)
 
         # Return loss components for monitoring
         loss_components = {
@@ -816,20 +659,17 @@ class BartLoss(nn.Module):
             'second_deriv_penalty': slew_penalty,
             'ssim_loss': ssim_loss,
             'mse_loss': mse_loss,
-            'constraints_violated': constraints_violated  # Add this for monitoring
         }
         
-        # Optional: Print loss info for monitoring (can be commented out for production)
-        # print(f"Total loss: {total_loss.item():.6f} (Constraints violated: {constraints_violated})")
-        # if not constraints_violated:
-        #     print(f"SSIM loss: {ssim_loss.item():.6f} (weight: {self.sssim_weight})")
-        #     print(f"MSE loss: {mse_loss.item():.6f} (weight: {self.mse_weight})")
+        # print(f"Total loss: {total_loss.item():.6f}")
+        # print(f"SSIM loss: {ssim_loss.item():.6f} (weight: {self.sssim_weight})")
+        # print(f"MSE loss: {mse_loss.item():.6f} (weight: {self.mse_weight})")
         # print(f"Grad penalty: {grad_penalty.item():.6f} (weight: {self.first_deriv_weight})")
         # print(f"Slew penalty: {slew_penalty.item():.6f} (weight: {self.second_deriv_weight})")
         
-        return total_loss, loss_components   
-    
+        return total_loss, loss_components
 
+   
 def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=1e-3, 
                 use_smooth_loss=True, use_bart_loss=False, model_save_dir='models', use_scheduler=False,
                 mse_weight=1.0, first_deriv_weight=0.001, second_deriv_weight=0.000,
@@ -862,7 +702,7 @@ def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=1
     
     # Optional scheduler
     if use_scheduler:
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.9)
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.7)
     else:
         scheduler = None
     
@@ -873,48 +713,10 @@ def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=1
     
     print("\n=== TRAINING STARTED ===")
     
-    # Initialize loss component tracking
-    detailed_losses = {
-        'epochs': [],
-        'train': {'total_loss': []},
-        'val': {'total_loss': []}
-    }
-    
-    # Initialize component-specific tracking based on loss type
-    if use_smooth_loss:
-        detailed_losses['train'].update({
-            'mse_loss': [],
-            'first_deriv_mse': [],
-            'second_deriv_mse': []
-        })
-        detailed_losses['val'].update({
-            'mse_loss': [],
-            'first_deriv_mse': [],
-            'second_deriv_mse': []
-        })
-    elif use_bart_loss:
-        detailed_losses['train'].update({
-            'first_deriv_penalty': [],
-            'second_deriv_penalty': [],
-            'ssim_loss': [],
-            'mse_loss': []
-        })
-        detailed_losses['val'].update({
-            'first_deriv_penalty': [],
-            'second_deriv_penalty': [],
-            'ssim_loss': [],
-            'mse_loss': []
-        })
-    
     # Main training loop with progress bar
     with tqdm(total=num_epochs, desc="Training Progress") as pbar:
         for epoch in range(num_epochs):
-            # print(f"\nEpoch {epoch+1}/{num_epochs}")
-            
-            # Initialize epoch component accumulators
-            epoch_train_components = {key: 0.0 for key in detailed_losses['train'].keys()}
-            epoch_val_components = {key: 0.0 for key in detailed_losses['val'].keys()}
-            
+            print(f"\nEpoch {epoch+1}/{num_epochs}")
             # Training phase
             total_train_loss = 0.0
             train_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} - Train", 
@@ -922,56 +724,52 @@ def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=1
             
             for batch_idx, (inputs, targets) in enumerate(train_bar):
                 inputs, targets = inputs.to(device), targets.to(device)
-                # print(f"Training on batch {batch_idx+1}/{len(train_bar)}")
+                print(f"Training on batch {batch_idx+1}/{len(train_bar)}")
                 
                 optimizer.zero_grad()
                 outputs = model(inputs)
                 
                 if use_smooth_loss or use_bart_loss:
-                    loss, loss_components = criterion(outputs, targets)
-                    # print(f"Batch {batch_idx+1} loss: {loss.item():.6f}")
-                    
-                    # Accumulate component losses
-                    for key in epoch_train_components.keys():
-                        if key in loss_components:
-                            epoch_train_components[key] += loss_components[key].item()
+                    loss, _ = criterion(outputs, targets)
+                    print(f"Batch {batch_idx+1} loss: {loss.item():.6f}")
                 else:
                     loss = criterion(outputs, targets)
-                    epoch_train_components['total_loss'] += loss.item()
-                    
-                loss.backward()
-                if use_bart_loss:
-                    max_grad_norm = 1e6  # Increased to allow more natural gradient flow for BartLoss
-                    grad_norm_before = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm, norm_type=2.0)
-                    
-                    # Compute actual clipped norm
-                    grad_norm_after = min(grad_norm_before, max_grad_norm)
-                    was_clipped = grad_norm_before > max_grad_norm
-                    
-                    # Check for NaN/Inf gradients
-                    nan_gradients = False
-                    for name, param in model.named_parameters():
-                        if param.grad is not None:
-                            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                                print(f"Warning: NaN/Inf gradient in {name} at epoch {epoch+1}, batch {batch_idx+1}")
-                                param.grad.zero_()  # Zero out bad gradients
-                                nan_gradients = True
-                    
-                    # # Print gradient info for BartLoss training
-                    # if use_bart_loss and batch_idx % 5 == 0:  # Print every 5th batch for monitoring
-                    #     print(f"    Gradient norm (before clipping): {grad_norm_before:.6f}")
-                    #     print(f"    Gradient norm (after clipping): {grad_norm_after:.6f}")
-                    #     print(f"    Gradient clipped: {'Yes' if was_clipped else 'No'}")
-                    #     print(f"    Gradient health: {'Exploding gradients detected and clipped' if was_clipped else 'Gradients flowing normally'}")
-                    #     print(f"    NaN gradients detected: {nan_gradients}")
 
+                loss.backward()
+                # print(f"Batch {batch_idx+1} gradients computed")
+                # Gradient clipping to prevent exploding gradients (increased threshold for BartLoss)
+                max_grad_norm = 1e6  # Increased to allow more natural gradient flow for BartLoss
+                grad_norm_before = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm, norm_type=2.0)
+                
+                # Compute actual clipped norm
+                grad_norm_after = min(grad_norm_before, max_grad_norm)
+                was_clipped = grad_norm_before > max_grad_norm
+                
+                # Check for NaN/Inf gradients
+                nan_gradients = False
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                            print(f"Warning: NaN/Inf gradient in {name} at epoch {epoch+1}, batch {batch_idx+1}")
+                            param.grad.zero_()  # Zero out bad gradients
+                            nan_gradients = True
+                
+                # Print gradient info for BartLoss training
+                if use_bart_loss and batch_idx % 5 == 0:  # Print every 5th batch for monitoring
+                    print(f"    Gradient norm (before clipping): {grad_norm_before:.6f}")
+                    print(f"    Gradient norm (after clipping): {grad_norm_after:.6f}")
+                    print(f"    Gradient clipped: {'Yes' if was_clipped else 'No'}")
+                    print(f"    Gradient health: {'Exploding gradients detected and clipped' if was_clipped else 'Gradients flowing normally'}")
+                    print(f"    NaN gradients detected: {nan_gradients}")
+                
                 optimizer.step()
                 
                 total_train_loss += loss.item()
             
-            # Validation phase
+            # Validation phase - FIXED FOR BART LOSS
             model.eval()
             total_val_loss = 0.0
+            
             if use_bart_loss:
                 # BartLoss requires gradients for internal BART operations during validation
                 # No weight updates occur because optimizer.step() is never called
@@ -980,33 +778,22 @@ def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=1
                     outputs = model(inputs)
                     # print(f"Validating batch with inputs shape: {inputs.shape}, targets shape: {targets.shape}")
                     
-                    val_loss, val_loss_components = criterion(outputs, targets)
+                    val_loss, _ = criterion(outputs, targets)
                     # print(f"Validation batch loss: {val_loss.item():.6f}")
                     total_val_loss += val_loss.item()
-                    
-                    # Accumulate component losses
-                    for key in epoch_val_components.keys():
-                        if key in val_loss_components:
-                            epoch_val_components[key] += val_loss_components[key].item()
             else:
                # VALIDATION PHASE - Also no weight updates
                 with torch.no_grad():
                     for inputs, targets in val_loader:
                         inputs, targets = inputs.to(device), targets.to(device)
                         outputs = model(inputs)
-                        # print(f"Validating batch with inputs shape: {inputs.shape}, targets shape: {targets.shape}")
+                        print(f"Validating batch with inputs shape: {inputs.shape}, targets shape: {targets.shape}")
                         
                         if use_smooth_loss:
-                            val_loss, val_loss_components = criterion(outputs, targets)
-                            # print(f"Validation batch loss: {val_loss.item():.6f}")
-                            
-                            # Accumulate component losses
-                            for key in epoch_val_components.keys():
-                                if key in val_loss_components:
-                                    epoch_val_components[key] += val_loss_components[key].item()
+                            val_loss, _ = criterion(outputs, targets)
+                            print(f"Validation batch loss: {val_loss.item():.6f}")
                         else:
                             val_loss = criterion(outputs, targets)
-                            epoch_val_components['total_loss'] += val_loss.item()
                             
                         total_val_loss += val_loss.item()
             
@@ -1014,19 +801,8 @@ def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=1
             if scheduler is not None:
                 scheduler.step()
             
-            # Average the losses and components
             avg_train_loss = total_train_loss / len(train_loader)
             avg_val_loss = total_val_loss / len(val_loader)
-            
-            # Store epoch data for detailed plotting
-            detailed_losses['epochs'].append(epoch + 1)
-            
-            # Average and store component losses
-            for key in epoch_train_components.keys():
-                detailed_losses['train'][key].append(epoch_train_components[key] / len(train_loader))
-            
-            for key in epoch_val_components.keys():
-                detailed_losses['val'][key].append(epoch_val_components[key] / len(val_loader))
             
             train_losses.append(avg_train_loss)
             val_losses.append(avg_val_loss)
@@ -1039,82 +815,6 @@ def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=1
                 'LR': f'{current_lr:.2e}'
             })
             pbar.update(1)
-
-            # Plot derivatives debugging for BART loss (every 1 epochs)
-            if use_bart_loss and (epoch + 1) % 1 == 0:
-                model.eval()
-                with torch.no_grad():
-                    # Get a sample from validation set for debugging
-                    for inputs, targets in val_loader:
-                        inputs = inputs.to(device)
-                        outputs = model(inputs)
-                        
-                        # Use the first sample in the batch for plotting
-                        predicted_sample = outputs[0:1]  # Shape: (1, 2, sequence_length)
-                        
-                        # Compute derivatives using the same function as BartLoss
-                        first_deriv, second_deriv = criterion.compute_derivatives_torch(predicted_sample)
-                        
-                        # Extract components
-                        ddx = second_deriv[:, 0, :]  # (1, seq_len)
-                        ddy = second_deriv[:, 1, :]  # (1, seq_len)
-                        
-                        # Create time vector for plotting
-                        time = torch.linspace(0, DURATION, predicted_sample.shape[2], device=predicted_sample.device)
-                        
-                        # Plot the first and second derivatives for debugging
-                        fig, axes = plt.subplots(1, 2, figsize=(15, 10))
-                        
-                        # Convert to numpy for plotting (detach from computational graph)
-                        time_np = time.cpu().numpy()
-                        ddx_np = ddx[0].detach().cpu().numpy()
-                        ddy_np = ddy[0].detach().cpu().numpy()
-                        
-                        # Plot second derivatives (acceleration)
-                        axes[0].plot(time_np, ddx_np, 'g-', label='d²x/dt² (acceleration)', linewidth=2)
-                        axes[0].set_title(f'Second Derivative: d²x/dt² (acceleration) - Epoch {epoch+1}')
-                        axes[0].set_ylabel('d²x/dt² (Hz/s)')
-                        axes[0].set_xlabel('Time (s)')
-                        axes[0].legend()
-                        axes[0].grid(True)
-                        
-                        axes[1].plot(time_np, ddy_np, 'm-', label='d²y/dt² (acceleration)', linewidth=2)
-                        axes[1].set_title(f'Second Derivative: d²y/dt² (acceleration) - Epoch {epoch+1}')
-                        axes[1].set_ylabel('d²y/dt² (Hz/s)')
-                        axes[1].set_xlabel('Time (s)')
-                        axes[1].legend()
-                        axes[1].grid(True)
-                        
-                        # Add slew rate limits
-                        axes[0].axhline(y=SLEW_RATE, color='red', linestyle='--', alpha=0.7, label=f'Slew Max: {SLEW_RATE} Hz/s')
-                        axes[0].axhline(y=-SLEW_RATE, color='red', linestyle='--', alpha=0.7)
-                        axes[1].axhline(y=SLEW_RATE, color='red', linestyle='--', alpha=0.7, label=f'Slew Max: {SLEW_RATE} Hz/s')
-                        axes[1].axhline(y=-SLEW_RATE, color='red', linestyle='--', alpha=0.7)
-                        
-                        plt.tight_layout()
-                        
-                        # Determine model architecture suffix for folder name
-                        model_suffix = ""
-                        if save_params:
-                            if save_params.get('test_net') == 'unet':
-                                model_suffix = "_unet"
-                            elif save_params.get('test_net') == 'freq_net':
-                                model_suffix = "_freq_net"
-                            elif save_params.get('use_cnn_02', False):
-                                model_suffix = "_cnn02"
-                            else:
-                                model_suffix = "_cnn"
-                        else:
-                            model_suffix = "_cnn"  # Default fallback
-                        
-                        # Save the plot with epoch number and model type
-                        plot_dir = f'plots/derivatives_debug{model_suffix}'
-                        os.makedirs(plot_dir, exist_ok=True)
-                        plt.savefig(os.path.join(plot_dir, f'derivatives_debug_epoch_{epoch+1}.png'), dpi=300, bbox_inches='tight')
-                        plt.close()
-                        print(f"Saved derivatives debug plot for epoch {epoch+1} to '{plot_dir}'")
-                        break  # Only use the first batch
-                model.train()
             
             # Print detailed info every 20 epochs
             if (epoch + 1) % 20 == 0:
@@ -1123,7 +823,7 @@ def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=1
                       f'Val Loss: {avg_val_loss:.6f}')
     
     print("\n=== TRAINING COMPLETED ===")
-    return train_losses, val_losses, detailed_losses
+    return train_losses, val_losses
 
 def save_model(model, filepath='circle_cnn_model.pth', save_full=False, save_dir='models', **kwargs):
     """
@@ -1205,71 +905,42 @@ def save_model(model, filepath='circle_cnn_model.pth', save_full=False, save_dir
         return full_path
 
 def load_pretrained_model(filepath='circle_cnn_model.pth', input_length=128, output_length=128, 
-                         load_dir='models', use_cnn_02=False, test_net=None, gpu_device=0):
-    """Load a pretrained model
-    
-    Args:
-        filepath: Path to the model file
-        input_length: Input sequence length  
-        output_length: Output sequence length
-        load_dir: Directory containing the model
-        use_cnn_02: Whether to use CircleCNN_02 architecture
-        test_net: Use alternative network architecture: 'unet' (TrajectoryUNet) or 'freq_net' (FrequencyAwareNet)
-        gpu_device: GPU device number (0 or 1) to load model onto
-    """
+                         load_dir='models', use_cnn_02=False):
+    """Load a pretrained model"""
     
     # Automatically determine the correct directory based on model architecture
-    if test_net == 'unet':
-        # Override load_dir if it's the default to use UNet specific directory
-        if load_dir == 'models':
-            load_dir = 'models_unet'
-    elif test_net == 'freq_net':
-        # Override load_dir if it's the default to use FrequencyAwareNet specific directory
-        if load_dir == 'models':
-            load_dir = 'models_freq_net'
-    elif use_cnn_02:
+    if use_cnn_02:
         # Override load_dir if it's the default 'models' to use CNN_02 specific directory
         if load_dir == 'models':
             load_dir = 'models_cnn02'
     else:
         # For standard CNN, use regular models directory
-        if load_dir in ['models_cnn02', 'models_unet', 'models_freq_net']:
+        if load_dir == 'models_cnn02':
             load_dir = 'models'
     
     full_path = os.path.join(load_dir, filepath)
     
     # Create model with appropriate architecture
-    if test_net == 'unet':
-        model = TrajectoryUNet(input_length=input_length, output_length=output_length)
-    elif test_net == 'freq_net':
-        model = FrequencyAwareNet(input_length=input_length, output_length=output_length)
-    elif use_cnn_02:
+    if use_cnn_02:
+        # from network import CircleCNN_02
         model = CircleCNN_02(input_length=input_length, output_length=output_length)
     else:
         model = CircleCNN(input_length=input_length, output_length=output_length)
     
     # Load the state dict
     try:
-        # Set device based on GPU availability and specified device
-        if torch.cuda.is_available():
-            device = torch.device(f'cuda:{gpu_device}')
-            map_location = device
-        else:
-            device = torch.device('cpu')
-            map_location = device
-        
         pytorch_version = torch.__version__
         major, minor = map(int, pytorch_version.split('.')[:2])
         
         # weights_only parameter was introduced in PyTorch 1.13.0
         if major > 1 or (major == 1 and minor >= 13):
-            model.load_state_dict(torch.load(full_path, map_location=map_location, weights_only=True))
+            model.load_state_dict(torch.load(full_path, map_location=device, weights_only=True))
         else:
-            model.load_state_dict(torch.load(full_path, map_location=map_location))
+            model.load_state_dict(torch.load(full_path, map_location=device))
             
         model = model.to(device)
         model.eval()  # Set to evaluation mode
-        print(f"Model loaded successfully from '{full_path}' on {device}")
+        print(f"Model loaded successfully from '{full_path}'")
         return model
     except FileNotFoundError:
         print(f"Model file '{full_path}' not found!")
@@ -1306,12 +977,12 @@ def inference_batch(model, input_batch):
         
         return predictions
 
-def demo_pretrained_usage(model_path='circle_cnn_model.pth', load_dir='models', use_cnn_02=False, test_net=None, gpu_device=0):
+def demo_pretrained_usage(model_path='circle_cnn_model.pth', load_dir='models', use_cnn_02=False):
     """Demonstrate how to use a pretrained model"""
     print("\n=== PRETRAINED MODEL DEMO ===")
     
     # Load pretrained model
-    model = load_pretrained_model(model_path, load_dir=load_dir, use_cnn_02=use_cnn_02, test_net=test_net, gpu_device=gpu_device)
+    model = load_pretrained_model(model_path, load_dir=load_dir, use_cnn_02=use_cnn_02)
     
     if model is None:
         print("No pretrained model found. Train a model first!")

@@ -8,6 +8,7 @@ import torch.nn as nn
 import numpy as np
 from torch.utils.data import Dataset
 from src.bart_interface import bart # Assuming BART is installed and accessible
+import torch.nn.functional as F
 DURATION = 0.5
 # Check for GPU availability
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -66,7 +67,6 @@ class CircleDataset(Dataset):
         
         return input_signal.float(), target.float()
 
-
 class CircleCNN(nn.Module):
     """1D CNN for circle generation with equal input/output lengths"""
     
@@ -107,7 +107,6 @@ class CircleCNN(nn.Module):
         
         # Output is already in the right format: (batch_size, 2, output_length)
         return x
-
 
 class CircleCNN_02(nn.Module):
     """Enhanced 1D CNN for circle generation with more parameters and residual connections"""
@@ -245,6 +244,8 @@ class CircleCNN_02(nn.Module):
         
         return x
 
+
+
 class BartNufft(torch.autograd.Function):
     """
     A custom PyTorch function to wrap the BART NUFFT operator.
@@ -314,3 +315,233 @@ def print_device_info():
     if device.type == 'cuda':
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"Memory allocated: {torch.cuda.memory_allocated(0) / 1024**2:.1f} MB")
+
+
+
+class TrajectoryUNet(nn.Module):
+    """U-Net architecture optimized for smooth trajectory generation"""
+    
+    def __init__(self, input_length=128, output_length=128, base_channels=64):
+        super(TrajectoryUNet, self).__init__()
+        
+        self.input_length = input_length
+        
+        # Input projection
+        self.input_conv = nn.Sequential(
+            nn.Conv1d(1, base_channels, kernel_size=7, padding=3),
+            nn.BatchNorm1d(base_channels),
+            nn.ReLU()
+        )
+        
+        # Encoder
+        self.enc1 = self._make_encoder_block(base_channels, base_channels*2)
+        self.pool1 = nn.MaxPool1d(2)  # 128 -> 64
+        
+        self.enc2 = self._make_encoder_block(base_channels*2, base_channels*4)
+        self.pool2 = nn.MaxPool1d(2)  # 64 -> 32
+        
+        self.enc3 = self._make_encoder_block(base_channels*4, base_channels*8)
+        self.pool3 = nn.MaxPool1d(2)  # 32 -> 16
+        
+        self.enc4 = self._make_encoder_block(base_channels*8, base_channels*16)
+        self.pool4 = nn.MaxPool1d(2)  # 16 -> 8
+        
+        # Bottleneck
+        self.bottleneck = nn.Sequential(
+            nn.Conv1d(base_channels*16, base_channels*32, kernel_size=3, padding=1),
+            nn.BatchNorm1d(base_channels*32),
+            nn.ReLU(),
+            nn.Conv1d(base_channels*32, base_channels*16, kernel_size=3, padding=1),
+            nn.BatchNorm1d(base_channels*16),
+            nn.ReLU()
+        )
+        
+        # Decoder (fix channel counts!)
+        self.up4 = nn.ConvTranspose1d(base_channels*16, base_channels*8, kernel_size=2, stride=2)
+        self.dec4 = self._make_decoder_block(base_channels*8 + base_channels*16, base_channels*8)
+        
+        self.up3 = nn.ConvTranspose1d(base_channels*8, base_channels*4, kernel_size=2, stride=2)
+        self.dec3 = self._make_decoder_block(base_channels*4 + base_channels*8, base_channels*4)
+        
+        self.up2 = nn.ConvTranspose1d(base_channels*4, base_channels*2, kernel_size=2, stride=2)
+        self.dec2 = self._make_decoder_block(base_channels*2 + base_channels*4, base_channels*2)
+        
+        self.up1 = nn.ConvTranspose1d(base_channels*2, base_channels, kernel_size=2, stride=2)
+        self.dec1 = self._make_decoder_block(base_channels + base_channels*2, base_channels)
+        
+        # Final output
+        self.final_conv = nn.Sequential(
+            nn.Conv1d(base_channels, base_channels//2, kernel_size=5, padding=2),
+            nn.BatchNorm1d(base_channels//2),
+            nn.ReLU(),
+            nn.Conv1d(base_channels//2, base_channels//4, kernel_size=3, padding=1),
+            nn.BatchNorm1d(base_channels//4),
+            nn.ReLU()
+        )
+        
+        self.output_conv = nn.Conv1d(base_channels//4, 2, kernel_size=1)
+        
+        # Smoothing kernel
+        self.register_buffer('smooth_kernel', self._create_smooth_kernel())
+    
+    def _make_encoder_block(self, in_channels, out_channels):
+        return nn.Sequential(
+            nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm1d(out_channels),
+            nn.ReLU(),
+            nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm1d(out_channels),
+            nn.ReLU()
+        )
+    
+    def _make_decoder_block(self, in_channels, out_channels):
+        return nn.Sequential(
+            nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm1d(out_channels),
+            nn.ReLU(),
+            nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm1d(out_channels),
+            nn.ReLU()
+        )
+    
+    def _create_smooth_kernel(self, sigma=1.0):
+        kernel_size = 5
+        x = torch.arange(kernel_size) - kernel_size // 2
+        kernel = torch.exp(-0.5 * (x / sigma) ** 2)
+        kernel = kernel / kernel.sum()
+        return kernel.view(1, 1, kernel_size).repeat(2, 1, 1)
+    
+    def forward(self, x):
+        # Input: (batch, 128)
+        x = x.unsqueeze(1)  # (batch, 1, 128)
+        x = self.input_conv(x)  # (batch, 64, 128)
+        
+        # Encoder
+        enc1_out = self.enc1(x)        # (batch, 128, 128)
+        x = self.pool1(enc1_out)       # (batch, 128, 64)
+        
+        enc2_out = self.enc2(x)        # (batch, 256, 64)
+        x = self.pool2(enc2_out)       # (batch, 256, 32)
+        
+        enc3_out = self.enc3(x)        # (batch, 512, 32)
+        x = self.pool3(enc3_out)       # (batch, 512, 16)
+        
+        enc4_out = self.enc4(x)        # (batch, 1024, 16)
+        x = self.pool4(enc4_out)       # (batch, 1024, 8)
+        
+        # Bottleneck
+        x = self.bottleneck(x)         # (batch, 1024, 8)
+        
+        # Decoder
+        x = self.up4(x)                # (batch, 512, 16)
+        x = torch.cat([x, enc4_out], dim=1)  # (batch, 1536, 16)
+        x = self.dec4(x)               # (batch, 512, 16)
+        
+        x = self.up3(x)                # (batch, 256, 32)
+        x = torch.cat([x, enc3_out], dim=1)  # (batch, 768, 32)
+        x = self.dec3(x)               # (batch, 256, 32)
+        
+        x = self.up2(x)                # (batch, 128, 64)
+        x = torch.cat([x, enc2_out], dim=1)  # (batch, 384, 64)
+        x = self.dec2(x)               # (batch, 128, 64)
+        
+        x = self.up1(x)                # (batch, 64, 128)
+        x = torch.cat([x, enc1_out], dim=1)  # (batch, 192, 128)
+        x = self.dec1(x)               # (batch, 64, 128)
+        
+        # Final layers
+        x = self.final_conv(x)         # (batch, 16, 128)
+        x = self.output_conv(x)        # (batch, 2, 128)
+        
+        # Smoothing
+        x = F.conv1d(x, self.smooth_kernel, padding=2, groups=2)
+        
+        return x
+
+    
+
+class FrequencyAwareNet(nn.Module):
+    """Explicitly controls frequency components to ensure smooth trajectories"""
+    
+    def __init__(self, input_length=128, output_length=128, base_channels=64):
+        super(FrequencyAwareNet, self).__init__()
+        
+        self.input_length = input_length
+        
+        # Frequency decomposition
+        self.low_freq_net = nn.Sequential(
+            nn.Conv1d(1, base_channels, kernel_size=15, padding=7),
+            nn.BatchNorm1d(base_channels),
+            nn.ReLU(),
+            nn.Conv1d(base_channels, base_channels, kernel_size=11, padding=5),
+            nn.BatchNorm1d(base_channels),
+            nn.ReLU()
+        )
+        
+        self.mid_freq_net = nn.Sequential(
+            nn.Conv1d(1, base_channels, kernel_size=7, padding=3),
+            nn.BatchNorm1d(base_channels),
+            nn.ReLU(),
+            nn.Conv1d(base_channels, base_channels, kernel_size=5, padding=2),
+            nn.BatchNorm1d(base_channels),
+            nn.ReLU()
+        )
+        
+        self.high_freq_net = nn.Sequential(
+            nn.Conv1d(1, base_channels//2, kernel_size=3, padding=1),
+            nn.BatchNorm1d(base_channels//2),
+            nn.ReLU(),
+            nn.Conv1d(base_channels//2, base_channels//2, kernel_size=3, padding=1),
+            nn.BatchNorm1d(base_channels//2),
+            nn.ReLU()
+        )
+        
+        # Frequency weighting (learnable low-pass bias)
+        self.freq_weights = nn.Parameter(torch.tensor([0.6, 0.3, 0.1]))  # Favor low frequencies
+        
+        # Feature processing
+        self.feature_proc = nn.Sequential(
+            nn.Conv1d(base_channels * 2 + base_channels//2, base_channels, kernel_size=3, padding=1),
+            nn.BatchNorm1d(base_channels),
+            nn.ReLU(),
+            nn.Conv1d(base_channels, base_channels, kernel_size=3, padding=1),
+            nn.BatchNorm1d(base_channels),
+            nn.ReLU()
+        )
+        
+        # Gaussian smoothing layer
+        self.register_buffer('gauss_kernel', self._create_gaussian_kernel(sigma=1.0))
+        
+        self.output_conv = nn.Conv1d(base_channels, 2, kernel_size=1)
+        
+    def _create_gaussian_kernel(self, sigma=1.0, kernel_size=7):
+        """Create 1D Gaussian smoothing kernel"""
+        x = torch.arange(kernel_size) - kernel_size // 2
+        kernel = torch.exp(-0.5 * (x / sigma) ** 2)
+        kernel = kernel / kernel.sum()
+        return kernel.view(1, 1, kernel_size)
+    
+    def forward(self, x):
+        x = x.unsqueeze(1)
+        
+        # Frequency decomposition
+        low_feat = self.low_freq_net(x)
+        mid_feat = self.mid_freq_net(x)
+        high_feat = self.high_freq_net(x)
+        
+        # Weighted combination (bias toward low frequencies)
+        weighted_low = self.freq_weights[0] * low_feat
+        weighted_mid = self.freq_weights[1] * mid_feat
+        weighted_high = self.freq_weights[2] * high_feat
+        
+        # Concatenate and process
+        freq_features = torch.cat([weighted_low, weighted_mid, weighted_high], dim=1)
+        x = self.feature_proc(freq_features)
+        
+        # Apply Gaussian smoothing
+        x = F.conv1d(x, self.gauss_kernel.repeat(x.size(1), 1, 1), 
+                     padding=3, groups=x.size(1))
+        
+        x = self.output_conv(x)
+        
+        return x

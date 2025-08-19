@@ -6,18 +6,20 @@ Modular execution script for training, evaluation, and visualization of circle t
 import argparse
 import os
 import torch
+import traceback
 from torch.utils.data import DataLoader
 import time
 
 # Local imports
-from src.network import CircleCNN, CircleCNN_02, CircleDataset, print_device_info
+from src.network import CircleCNN, CircleCNN_02, CircleDataset, TrajectoryUNet, FrequencyAwareNet, print_device_info
 from src.train import train_model, save_model, load_pretrained_model, demo_pretrained_usage
-from src.plots import (plot_training_curves, visualize_results, plot_circle, 
+from src.plots import (plot_training_curves, plot_losses, visualize_results, plot_circle, 
                    analyze_model_predictions, plot_pretrained_demo)
-from src.network_utils import shift_trajectory, rotate_traj, complex_traj, demo_trajectory_utilities
-from src.bart_config import PipelineConfig, create_default_config
-from src.bart_interpolation_fct import fast_kspace_interpolation_v3
-from src.bart_utils import run_bart_nufft, build_para, rescale_recon_img, plot_comparison, downsample_image
+from src.network_utils import demo_trajectory_utilities
+# from src.network_utils import shift_trajectory, rotate_traj, complex_traj, demo_trajectory_utilities
+# from src.bart_config import PipelineConfig, create_default_config
+# from src.bart_interpolation_fct import fast_kspace_interpolation_v3
+# from src.bart_utils import run_bart_nufft, build_para, rescale_recon_img, plot_comparison, downsample_image
 
 
 RES = 50   # Resolution in pixels
@@ -43,12 +45,15 @@ def parse_arguments():
                        help='Number of hidden channels in CNN (default: 64)')
     parser.add_argument('--use_cnn_02', action='store_true',
                        help='Use deeper CircleCNN_02 architecture instead of CircleCNN (default: False)')
+    parser.add_argument('--test_net', type=str, default=None,
+                       choices=['unet', 'freq_net'],
+                       help='Use alternative network architecture: unet (TrajectoryUNet) or freq_net (FrequencyAwareNet) (default: None)')
     
     # Dataset parameters
-    parser.add_argument('--train_samples', type=int, default=1000,
-                       help='Number of training samples (default: 1000)')
-    parser.add_argument('--val_samples', type=int, default=200,
-                       help='Number of validation samples (default: 200)')
+    parser.add_argument('--train_samples', type=int, default=20,
+                       help='Number of training samples (default: 20)')
+    parser.add_argument('--val_samples', type=int, default=7,
+                       help='Number of validation samples (default: 7)')
     parser.add_argument('--radius', type=float, default=KMAX_RES / 2,
                        help='Circle radius (default: 1.0)')
     parser.add_argument('--noise_level', type=float, default=0,
@@ -63,10 +68,14 @@ def parse_arguments():
                        help='Learning rate (default: 1e-3)')
     parser.add_argument('--use_scheduler', action='store_true',
                        help='Use learning rate scheduler (default: False)')
-    parser.add_argument('--use_smooth_loss', action='store_true', default=True,
-                       help='Use smooth loss function (default: True)')
+    parser.add_argument('--gpu', type=int, default=0, choices=[0, 1],
+                       help='GPU device to use (0 or 1, default: 0)')
+    parser.add_argument('--use_smooth_loss', action='store_true', default=False,
+                       help='Use smooth loss function (default: False)')
     parser.add_argument('--no_smooth_loss', action='store_true',
                        help='Disable smooth loss function')
+    parser.add_argument('--bart_loss', action='store_true',
+                       help='Use BART reconstruction loss instead of smooth loss (default: False)')
     
     # Smooth loss parameters (only used if use_smooth_loss is True)
     parser.add_argument('--mse_weight', type=float, default=1.0,
@@ -75,6 +84,10 @@ def parse_arguments():
                        help='First derivative weight in smooth loss (default: 0.001)')
     parser.add_argument('--second_deriv_weight', type=float, default=0.002,
                        help='Second derivative weight in smooth loss (default: 0.002)')
+    
+    # BART loss parameters (only used if bart_loss is True)
+    parser.add_argument('--sssim_weight', type=float, default=20.0,
+                       help='SSIM weight in BART loss (default: 20.0)')
 
     # File paths
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -93,12 +106,47 @@ def parse_arguments():
     
     return parser.parse_args()
 
-def get_model_subdirs(use_cnn_02):
+def get_model_subdirs(use_cnn_02, test_net=None):
     """Get appropriate subdirectories based on model architecture"""
-    if use_cnn_02:
+    if test_net == 'unet':
+        return 'models_unet', 'plots_unet'
+    elif test_net == 'freq_net':
+        return 'models_freq_net', 'plots_freq_net'
+    elif use_cnn_02:
         return 'models_cnn02', 'plots_cnn02'
     else:
         return 'models', 'plots'
+
+def create_model(input_length, output_length, hidden_channels, use_cnn_02=False, test_net=None):
+    """Create a model based on the specified architecture"""
+    if test_net == 'unet':
+        print("Creating new TrajectoryUNet model...")
+        return TrajectoryUNet(
+            input_length=input_length,
+            output_length=output_length,
+            base_channels=hidden_channels
+        )
+    elif test_net == 'freq_net':
+        print("Creating new FrequencyAwareNet model...")
+        return FrequencyAwareNet(
+            input_length=input_length,
+            output_length=output_length,
+            base_channels=hidden_channels
+        )
+    elif use_cnn_02:
+        print("Creating new CircleCNN_02 (deeper) model...")
+        return CircleCNN_02(
+            input_length=input_length,
+            output_length=output_length,
+            base_channels=hidden_channels
+        )
+    else:
+        print("Creating new CircleCNN model...")
+        return CircleCNN(
+            input_length=input_length,
+            output_length=output_length,
+            hidden_channels=hidden_channels
+        )
 
 def run_training(args):
     """Run the training pipeline"""
@@ -135,43 +183,40 @@ def run_training(args):
                                     args.input_length, 
                                     args.output_length,
                                     load_dir=args.model_dir,
-                                    use_cnn_02=args.use_cnn_02)
+                                    use_cnn_02=args.use_cnn_02,
+                                    test_net=args.test_net,
+                                    gpu_device=args.gpu)
         if model is None:
             print("Failed to load pretrained model, creating new model...")
-            if args.use_cnn_02:
-                print("Creating new CircleCNN_02 (deeper) model...")
-                model = CircleCNN_02(
-                    input_length=args.input_length,
-                    output_length=args.output_length,
-                    base_channels=args.hidden_channels
-                )
-            else:
-                model = CircleCNN(
-                    input_length=args.input_length,
-                    output_length=args.output_length,
-                    hidden_channels=args.hidden_channels
-                )
+            model = create_model(
+                args.input_length,
+                args.output_length,
+                args.hidden_channels,
+                use_cnn_02=args.use_cnn_02,
+                test_net=args.test_net
+            )
         else:
             print("Successfully loaded pretrained model for retraining")
             # Set model back to training mode (load_pretrained_model sets it to eval)
             model.train()
     else:
-        if args.use_cnn_02:
-            print("Creating new CircleCNN_02 (deeper) model...")
-            model = CircleCNN_02(
-                input_length=args.input_length,
-                output_length=args.output_length,
-                base_channels=args.hidden_channels
-            )
-        else:
-            print("Creating new CircleCNN model...")
-            model = CircleCNN(
-                input_length=args.input_length,
-                output_length=args.output_length,
-                hidden_channels=args.hidden_channels
-            )
+        model = create_model(
+            args.input_length,
+            args.output_length,
+            args.hidden_channels,
+            use_cnn_02=args.use_cnn_02,
+            test_net=args.test_net
+        )
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Set the specific GPU device
+    if torch.cuda.is_available():
+        device = torch.device(f'cuda:{args.gpu}')
+        torch.cuda.set_device(args.gpu)
+        print(f"Using GPU {args.gpu}: {torch.cuda.get_device_name(args.gpu)}")
+    else:
+        device = torch.device('cpu')
+        print("CUDA not available, using CPU")
+    
     model = model.to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
@@ -179,6 +224,12 @@ def run_training(args):
     # Train model
     print("Starting training...")
     use_smooth = args.use_smooth_loss and not args.no_smooth_loss
+    use_bart = args.bart_loss
+    
+    # Validate loss type selection
+    if use_bart and use_smooth:
+        print("Warning: Both BART loss and smooth loss specified. Using BART loss.")
+        use_smooth = False
     
     # Prepare save parameters for emergency save
     save_params = {
@@ -188,7 +239,9 @@ def run_training(args):
         'radius': args.radius,
         'use_scheduler': args.use_scheduler,
         'use_smooth_loss': use_smooth,
-        'use_cnn_02': args.use_cnn_02
+        'use_bart_loss': use_bart,
+        'use_cnn_02': args.use_cnn_02,
+        'test_net': args.test_net
     }
     
     # Add smooth loss weights if used
@@ -199,33 +252,45 @@ def run_training(args):
             'second_deriv_weight': args.second_deriv_weight
         })
     
+    # Add BART loss weights if used
+    if use_bart:
+        # If args.mse_weight is default value, use 1e-3 instead
+        if args.mse_weight == 1.0:
+            args.mse_weight = 1e-3
+        save_params.update({
+            'mse_weight': args.mse_weight,
+            'first_deriv_weight': args.first_deriv_weight,
+            'second_deriv_weight': args.second_deriv_weight,
+            'sssim_weight': args.sssim_weight
+        })
+    
     # Call train_model with the new signature
     result = train_model(
         model, train_loader, val_loader,
         num_epochs=args.num_epochs,
         learning_rate=args.learning_rate,
         use_smooth_loss=use_smooth,
+        use_bart_loss=use_bart,
         model_save_dir=args.model_dir,
         use_scheduler=args.use_scheduler,
-        mse_weight=args.mse_weight if use_smooth else 1.0,
-        first_deriv_weight=args.first_deriv_weight if use_smooth else 0.001,
-        second_deriv_weight=args.second_deriv_weight if use_smooth else 0.0005,
+        mse_weight=args.mse_weight if (use_smooth or use_bart) else 1.0,
+        first_deriv_weight=args.first_deriv_weight if (use_smooth or use_bart) else 0.001,
+        second_deriv_weight=args.second_deriv_weight if (use_smooth or use_bart) else 0.0005,
+        sssim_weight=args.sssim_weight if use_bart else 2.0,
         save_params=save_params
     )
     
-    # Handle the result (now includes interruption flag)
-    if len(result) == 3:
-        train_losses, val_losses, was_interrupted = result
-    else:
-        # Backward compatibility
-        train_losses, val_losses = result
-        was_interrupted = False
-    
-    # If training was interrupted, stop the pipeline
-    if was_interrupted:
-        print("\n=== PIPELINE STOPPED DUE TO USER INTERRUPTION ===")
-        return None, None, None, None, None
-    
+    # Handle the result (train_model now returns train_losses, val_losses, detailed_losses)
+    train_losses, val_losses, detailed_losses = result
+    # print(f"Detailed losses keys: {list(detailed_losses.keys())}")
+    # print(f"Detailed losses structure:")
+    # for key, value in detailed_losses.items():
+    #     if isinstance(value, dict):
+    #         print(f"  {key}: {list(value.keys())}")
+    #     else:
+            # print(f"  {key}: {type(value)} with length {len(value) if hasattr(value, '__len__') else 'N/A'}")
+    # print(f"use_smooth: {use_smooth}, use_bart: {use_bart}")
+    # print(f"Condition check: detailed_losses={bool(detailed_losses)} and (use_smooth or use_bart)={use_smooth or use_bart}")
     # Plot training curves with parameters for folder naming
     training_params = {
         'num_epochs': args.num_epochs,
@@ -233,18 +298,52 @@ def run_training(args):
         'batch_size': args.batch_size,
         # 'radius': args.radius,  # Removed radius from folder names
         'use_scheduler': args.use_scheduler,
-        'use_smooth_loss': args.use_smooth_loss and not args.no_smooth_loss
+        'use_smooth_loss': use_smooth,
+        'use_bart_loss': use_bart,
+        'use_cnn_02': args.use_cnn_02,
+        'test_net': args.test_net
     }
     
     # Add smooth loss weights to folder name if smooth loss is used
-    if args.use_smooth_loss and not args.no_smooth_loss:
+    if use_smooth:
         training_params.update({
             'mse_weight': args.mse_weight,
             'first_deriv_weight': args.first_deriv_weight,
             'second_deriv_weight': args.second_deriv_weight
         })
     
+    # Add BART loss weights to folder name if BART loss is used
+    if use_bart:
+        training_params.update({
+            'mse_weight': args.mse_weight,
+            'first_deriv_weight': args.first_deriv_weight,
+            'second_deriv_weight': args.second_deriv_weight,
+            'sssim_weight': args.sssim_weight
+        })
+    
     run_folder = plot_training_curves(train_losses, val_losses, save_path=args.plot_dir, **training_params)
+
+    
+    # Create detailed loss component plots if available
+    if detailed_losses and (use_smooth or use_bart):
+        try:
+            loss_type = 'bart' if use_bart else 'smooth'
+            # Pass the actual weights used during training to plot_losses
+            plot_losses(
+                detailed_losses, 
+                save_path=args.plot_dir,
+                loss_type=loss_type,
+                run_folder=run_folder,
+                mse_weight=args.mse_weight,
+                first_deriv_weight=args.first_deriv_weight,
+                second_deriv_weight=args.second_deriv_weight,
+                sssim_weight=args.sssim_weight if use_bart else 1e-10 # Cannot be set as 0 for loss plotting (logarithm issues)
+            )
+            print(f"Detailed loss component plots saved to: {run_folder}")
+        except Exception as e:
+            print(f"Warning: Could not create detailed loss plots: {e}")
+            import traceback
+            traceback.print_exc()
     
     # Save model with structured filename including parameters
     model_params = {
@@ -253,16 +352,27 @@ def run_training(args):
         'batch_size': args.batch_size,
         # 'radius': args.radius,  # Removed radius from model names
         'use_scheduler': args.use_scheduler,
-        'use_smooth_loss': args.use_smooth_loss and not args.no_smooth_loss,
-        'use_cnn_02': args.use_cnn_02
+        'use_smooth_loss': use_smooth,
+        'use_bart_loss': use_bart,
+        'use_cnn_02': args.use_cnn_02,
+        'test_net': args.test_net
     }
     
     # Add smooth loss weights if used
-    if args.use_smooth_loss and not args.no_smooth_loss:
+    if use_smooth:
         model_params.update({
             'mse_weight': args.mse_weight,
             'first_deriv_weight': args.first_deriv_weight,
             'second_deriv_weight': args.second_deriv_weight
+        })
+    
+    # Add BART loss weights if used
+    if use_bart:
+        model_params.update({
+            'mse_weight': args.mse_weight,
+            'first_deriv_weight': args.first_deriv_weight,
+            'second_deriv_weight': args.second_deriv_weight,
+            'sssim_weight': args.sssim_weight
         })
     
     saved_model_path = save_model(model, args.model_name, save_dir=args.model_dir, **model_params)
@@ -275,24 +385,39 @@ def create_run_folder(args, mode_suffix="eval"):
     from src.plots import create_structured_subfolder
     
     # Create parameters dict similar to training
+    use_smooth = args.use_smooth_loss and not args.no_smooth_loss
+    use_bart = args.bart_loss if hasattr(args, 'bart_loss') else False
+    
     params = {
         'num_epochs': args.num_epochs,
         'learning_rate': args.learning_rate,
         'batch_size': args.batch_size,
         'use_scheduler': args.use_scheduler,
-        'use_smooth_loss': args.use_smooth_loss and not args.no_smooth_loss
+        'use_smooth_loss': use_smooth,
+        'use_bart_loss': use_bart,
+        'use_cnn_02': args.use_cnn_02,
+        'test_net': args.test_net
     }
     
     # Add smooth loss weights if used
-    if args.use_smooth_loss and not args.no_smooth_loss:
+    if use_smooth:
         params.update({
             'mse_weight': args.mse_weight,
             'first_deriv_weight': args.first_deriv_weight,
             'second_deriv_weight': args.second_deriv_weight
         })
     
-    # Add mode suffix to distinguish from training runs
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Add BART loss weights if used
+    if use_bart:
+        params.update({
+            'mse_weight': args.mse_weight,
+            'first_deriv_weight': args.first_deriv_weight,
+            'second_deriv_weight': args.second_deriv_weight,
+            'sssim_weight': args.sssim_weight
+        })
+    
+    # # Add mode suffix to distinguish from training runs
+    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Create the subfolder
     run_folder = create_structured_subfolder(args.plot_dir, mode_suffix, **params)
@@ -306,6 +431,8 @@ def run_evaluation(args, model=None, val_dataset=None, run_folder=None):
     if run_folder is None:
         run_folder = create_run_folder(args, "eval")
         print(f"Created evaluation folder: {run_folder}")
+    else:
+        print(f"Using provided run folder: {run_folder}")
     
     # Load model if not provided
     if model is None:
@@ -313,10 +440,20 @@ def run_evaluation(args, model=None, val_dataset=None, run_folder=None):
                                     args.input_length, 
                                     args.output_length,
                                     load_dir=args.model_dir,
-                                    use_cnn_02=args.use_cnn_02)
+                                    use_cnn_02=args.use_cnn_02,
+                                    test_net=args.test_net,
+                                    gpu_device=args.gpu)
         if model is None:
             print("No model found for evaluation!")
             return None, None
+        
+        # Move model to specified GPU
+        if torch.cuda.is_available():
+            device = torch.device(f'cuda:{args.gpu}')
+            model = model.to(device)
+            print(f"Model moved to GPU {args.gpu}")
+        else:
+            print("CUDA not available, using CPU")
     
     # Create validation dataset if not provided
     if val_dataset is None:
@@ -359,10 +496,20 @@ def run_plotting(args, model=None, val_dataset=None, run_folder=None):
                                     args.input_length,
                                     args.output_length,
                                     load_dir=args.model_dir,
-                                    use_cnn_02=args.use_cnn_02)
+                                    use_cnn_02=args.use_cnn_02,
+                                    test_net=args.test_net,
+                                    gpu_device=args.gpu)
         if model is None:
             print("No model found for plotting!")
             return
+        
+        # Move model to specified GPU
+        if torch.cuda.is_available():
+            device = torch.device(f'cuda:{args.gpu}')
+            model = model.to(device)
+            print(f"Model moved to GPU {args.gpu}")
+        else:
+            print("CUDA not available, using CPU")
     
     # Create validation dataset if not provided
     if val_dataset is None:
@@ -384,7 +531,6 @@ def run_demo(args, run_folder=None, model=None, model_path=None):
     # Create run folder if not provided and model is not from training pipeline
     if run_folder is None and model is None:
         run_folder = create_run_folder(args, "demo")
-        print(f"Created demo folder: {run_folder}")
     
     # If model is provided directly, use it (from training pipeline)
     if model is not None:
@@ -403,14 +549,15 @@ def run_demo(args, run_folder=None, model=None, model_path=None):
             ky = prediction[0, 1, :].cpu().numpy()  # Second channel (ky)
             
             # Apply trajectory utilities
-            result = demo_trajectory_utilities(kx, ky, args.plot_dir, run_folder)
+            # result = demo_trajectory_utilities(kx, ky, args.plot_dir, run_folder)
+            demo_trajectory_utilities(kx, ky, args.plot_dir, run_folder)
             
         # Also run the original plotting
         plot_pretrained_demo(model, save_path=args.plot_dir, run_folder=run_folder)
         return model    # Otherwise, try to load from file
     model_name = model_path if model_path is not None else args.model_name
     
-    result = demo_pretrained_usage(model_name, load_dir=args.model_dir, use_cnn_02=args.use_cnn_02)
+    result = demo_pretrained_usage(model_name, load_dir=args.model_dir, use_cnn_02=args.use_cnn_02, test_net=args.test_net, gpu_device=args.gpu)
     
     # Handle the case where demo_pretrained_usage returns None
     if result is None:
@@ -421,13 +568,20 @@ def run_demo(args, run_folder=None, model=None, model_path=None):
     if isinstance(result, tuple) and len(result) == 2:
         model, prediction = result
         
+        # Move model to specified GPU
+        if model is not None and torch.cuda.is_available():
+            device = torch.device(f'cuda:{args.gpu}')
+            model = model.to(device)
+            print(f"Model moved to GPU {args.gpu}")
+        
         # Extract kx, ky from prediction if available
         if prediction is not None:
             kx = prediction[0].numpy()  # First channel (kx)
             ky = prediction[1].numpy()  # Second channel (ky)
             
             # Apply trajectory utilities
-            result = demo_trajectory_utilities(kx, ky, args.plot_dir, run_folder)
+            # result = demo_trajectory_utilities(kx, ky, args.plot_dir, run_folder)
+            demo_trajectory_utilities(kx, ky, args.plot_dir, run_folder)
             
     else:
         model = result
@@ -447,7 +601,8 @@ def run_demo(args, run_folder=None, model=None, model_path=None):
                 ky = prediction[0, 1, :].cpu().numpy()  # Second channel (ky)
                 
                 # Apply trajectory utilities
-                result = demo_trajectory_utilities(kx, ky, args.plot_dir, run_folder)
+                # result = demo_trajectory_utilities(kx, ky, args.plot_dir, run_folder)
+                demo_trajectory_utilities(kx, ky, args.plot_dir, run_folder)
     
     if model is not None:
         plot_pretrained_demo(model, save_path=args.plot_dir, run_folder=run_folder)
@@ -460,7 +615,7 @@ def main():
     args = parse_arguments()
     
     # Get appropriate directories based on model architecture
-    model_dir, plot_dir = get_model_subdirs(args.use_cnn_02)
+    model_dir, plot_dir = get_model_subdirs(args.use_cnn_02, args.test_net)
     
     # Override the default directories
     if args.model_dir == 'models':  # Only override if using default
@@ -474,7 +629,19 @@ def main():
     
     print(f"Running in {args.mode} mode...")
     print(f"Configuration:")
-    print(f"  - Model architecture: {'CircleCNN_02 (deeper)' if args.use_cnn_02 else 'CircleCNN (standard)'}")
+    
+    # Determine model architecture string
+    if args.test_net == 'unet':
+        model_arch = 'TrajectoryUNet'
+    elif args.test_net == 'freq_net':
+        model_arch = 'FrequencyAwareNet'
+    elif args.use_cnn_02:
+        model_arch = 'CircleCNN_02 (deeper)'
+    else:
+        model_arch = 'CircleCNN (standard)'
+    
+    print(f"  - Model architecture: {model_arch}")
+    print(f"  - GPU device: {args.gpu} ({'Available' if torch.cuda.is_available() else 'Not available - using CPU'})")
     print(f"  - Input/Output length: {args.input_length}/{args.output_length}")
     print(f"  - Hidden channels: {args.hidden_channels}")
     print(f"  - Training samples: {args.train_samples}")
@@ -485,10 +652,16 @@ def main():
     print(f"  - Circle radius: {args.radius}")
     print(f"  - Noise level: {args.noise_level}")
     print(f"  - Use smooth loss: {args.use_smooth_loss and not args.no_smooth_loss}")
+    print(f"  - Use BART loss: {args.bart_loss}")
     if args.use_smooth_loss and not args.no_smooth_loss:
         print(f"    - MSE weight: {args.mse_weight}")
         print(f"    - First deriv weight: {args.first_deriv_weight}")
         print(f"    - Second deriv weight: {args.second_deriv_weight}")
+    if args.bart_loss:
+        print(f"    - MSE weight: {args.mse_weight}")
+        print(f"    - First deriv weight: {args.first_deriv_weight}")
+        print(f"    - Second deriv weight: {args.second_deriv_weight}")
+        print(f"    - SSIM weight: {args.sssim_weight}")
     print(f"  - Use learning rate scheduler: {args.use_scheduler}")
     if args.pretrained_model:
         print(f"  - Pretrained model: {args.pretrained_model}")
@@ -500,8 +673,6 @@ def main():
     # Execute based on mode
     if args.mode == 'train':
         result = run_training(args)
-        if result[0] is None:  # Training was interrupted
-            return
         model, train_dataset, val_dataset, run_folder, saved_model_path = result
         # Extract just the filename from the full path
         saved_model_name = os.path.basename(saved_model_path) if saved_model_path else args.model_name
@@ -519,8 +690,6 @@ def main():
         # Run complete pipeline
         print("=== RUNNING COMPLETE PIPELINE ===")
         result = run_training(args)
-        if result[0] is None:  # Training was interrupted
-            return
         model, train_dataset, val_dataset, run_folder, saved_model_path = result
         # Extract just the filename from the full path
         saved_model_name = os.path.basename(saved_model_path) if saved_model_path else args.model_name
@@ -536,16 +705,20 @@ def main():
     if 'run_folder' in locals():
         print(f"Current run plots saved in: {run_folder}")
     print("\n=== HOW TO REUSE THIS MODEL ===")
-    if args.use_cnn_02:
-        print(f"1. Load model: python run.py --mode demo --use_cnn_02 --model_name {saved_model_name}")
-        print(f"2. Full evaluation (with all plots and analysis): python run.py --mode evaluate --use_cnn_02 --model_name {saved_model_name}")
-        print(f"3. Derivative analysis only: python run.py --mode plot --use_cnn_02 --model_name {saved_model_name}")
-        print(f"4. Retrain: python run.py --mode train --use_cnn_02 --pretrained_model {saved_model_name}")
-    else :
-        print(f"1. Load model: python run.py --mode demo --model_name {saved_model_name}")
-        print(f"2. Full evaluation (with all plots and analysis): python run.py --mode evaluate --model_name {saved_model_name}")
-        print(f"3. Derivative analysis only: python run.py --mode plot --model_name {saved_model_name}")
-        print(f"4. Retrain: python run.py --mode train --pretrained_model {saved_model_name}")
+    
+    # Build the command suffix based on the model architecture used
+    arch_suffix = ""
+    if args.test_net == 'unet':
+        arch_suffix = " --test_net unet"
+    elif args.test_net == 'freq_net':
+        arch_suffix = " --test_net freq_net"
+    elif args.use_cnn_02:
+        arch_suffix = " --use_cnn_02"
+    
+    print(f"1. Load model: python run.py --mode demo{arch_suffix} --model_name {saved_model_name}")
+    print(f"2. Full evaluation (with all plots and analysis): python run.py --mode evaluate{arch_suffix} --model_name {saved_model_name}")
+    print(f"3. Derivative analysis only: python run.py --mode plot{arch_suffix} --model_name {saved_model_name}")
+    print(f"4. Retrain: python run.py --mode train{arch_suffix} --pretrained_model {saved_model_name}")
 
 
 if __name__ == "__main__":

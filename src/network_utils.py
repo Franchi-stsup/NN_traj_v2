@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import sys
+from src.bart_metrics import mean_squared_error, structural_similarity_index 
 
 FOV = 224  # Field of View in mm (from run.py)
 
@@ -28,9 +29,10 @@ def shift_trajectory(kx, ky):
     # Find indices where kx == 0 (or closest to zero)
     idx = np.argmin(np.abs(kx))
     ky_at_kx0 = ky[0] #TAKE THE FIRST VALUE AT KX=0
+    kx_at_kx0 = kx[0]
     
     # Apply translation
-    kx_shift = kx.copy()
+    kx_shift = kx - kx_at_kx0
     ky_shift = ky - ky_at_kx0
     
     return kx_shift, ky_shift
@@ -204,6 +206,7 @@ def demo_trajectory_utilities(kx, ky, save_path, run_folder=None, n_rotations=79
     from src.plots import plot_trajectory_shift_comparison, plot_rotated_trajectories, plot_trajectory_utilities_combined
     
     print("\n=== TRAJECTORY UTILITIES DEMO ===")
+    print(f"DEBUG: demo_trajectory_utilities called with save_path={save_path}, run_folder={run_folder}")
     
     # Create save directory
     # if run_folder:
@@ -212,8 +215,10 @@ def demo_trajectory_utilities(kx, ky, save_path, run_folder=None, n_rotations=79
     #     plot_save_dir = save_path
     if run_folder:
         plot_save_dir = run_folder  # Use the run_folder directly
+        print(f"DEBUG: Using run_folder as plot_save_dir: {plot_save_dir}")
     else:
         plot_save_dir = save_path
+        print(f"DEBUG: Using save_path as plot_save_dir: {plot_save_dir}")
     os.makedirs(plot_save_dir, exist_ok=True)
     
     # 1. Original trajectory
@@ -252,15 +257,15 @@ def demo_trajectory_utilities(kx, ky, save_path, run_folder=None, n_rotations=79
     print("4. Creating trajectory plots...")
     
     # Plot shift comparison
-    shift_plot_path = plot_trajectory_shift_comparison(kx, ky, kx_shifted, ky_shifted, plot_save_dir)
+    shift_plot_path = plot_trajectory_shift_comparison(kx, ky, kx_shifted, ky_shifted, plot_save_dir, run_folder=plot_save_dir)
     print(f"   Saved shift comparison to: {shift_plot_path}")
     
     # Plot rotated trajectories
-    rotated_plot_path = plot_rotated_trajectories(kSpaceTrj, plot_save_dir)
+    rotated_plot_path = plot_rotated_trajectories(kSpaceTrj, plot_save_dir, run_folder=plot_save_dir)
     print(f"   Saved rotated trajectories to: {rotated_plot_path}")
     
     # Plot combined view
-    combined_plot_path = plot_trajectory_utilities_combined(kx, ky, kx_shifted, ky_shifted, kSpaceTrj, plot_save_dir)
+    combined_plot_path = plot_trajectory_utilities_combined(kx, ky, kx_shifted, ky_shifted, kSpaceTrj, plot_save_dir, run_folder=plot_save_dir)
     print(f"   Saved combined view to: {combined_plot_path}")
     
     # 5. Prepare for image reconstruction
@@ -314,8 +319,12 @@ def demo_trajectory_utilities(kx, ky, save_path, run_folder=None, n_rotations=79
                 save_path='plots_bart/comparison.png',
                 show=False
             )
-            print(f"   Saved reconstruction comparison to: plots_bart/comparison.png")
-        
+            # Note: plot_comparison now automatically adds timestamp to filename
+        ssim = structural_similarity_index(ground_truth_img_down, recon_img)
+        mse = mean_squared_error(ground_truth_img_down, recon_img)
+        print(f"   SSIM: {ssim:.4f}, MSE: {mse:.4f}")
+
+
         reconstruction_data = {
             'recon_img': recon_img,
             'kspace_sampled': kspace_sampled,
@@ -326,18 +335,18 @@ def demo_trajectory_utilities(kx, ky, save_path, run_folder=None, n_rotations=79
         reconstruction_data = None
     
     print(f"=== TRAJECTORY UTILITIES DEMO COMPLETED ===\n")
-    
+    return ssim, mse
     # Return all computed data
-    return {
-        'kx_original': kx,
-        'ky_original': ky,
-        'kx_shifted': kx_shifted,
-        'ky_shifted': ky_shifted,
-        'kSpaceTrj': kSpaceTrj,
-        'plot_paths': {
-            'shift_comparison': shift_plot_path,
-            'rotated_trajectories': rotated_plot_path,
-            'combined_view': combined_plot_path
-        },
-        'reconstruction': reconstruction_data
-    }
+    # return {
+    #     'kx_original': kx,
+    #     'ky_original': ky,
+    #     'kx_shifted': kx_shifted,
+    #     'ky_shifted': ky_shifted,
+    #     'kSpaceTrj': kSpaceTrj,
+    #     'plot_paths': {
+    #         'shift_comparison': shift_plot_path,
+    #         'rotated_trajectories': rotated_plot_path,
+    #         'combined_view': combined_plot_path
+    #     },
+    #     'reconstruction': reconstruction_data
+    # }

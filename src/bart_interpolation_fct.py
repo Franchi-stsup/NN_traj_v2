@@ -87,7 +87,7 @@ def fast_kspace_interpolation_v3(kspace_data, rosette_traj, FoV=224): #, Kmax_re
     """
     Optimized griddata with spatial filtering
     """
-    print("  Using spatially filtered griddata...")
+    # print("  Using spatially filtered griddata...")
     
     Nx, Ny = kspace_data.shape
     Kmax_orig = Nx / (FoV * 1e-3) / 2
@@ -119,7 +119,7 @@ def fast_kspace_interpolation_v3(kspace_data, rosette_traj, FoV=224): #, Kmax_re
         nearby_indices.update(indices)
     
     nearby_indices = list(nearby_indices)
-    print(f"  Using {len(nearby_indices)} grid points (vs {len(grid_points)} original)")
+    # print(f"  Using {len(nearby_indices)} grid points (vs {len(grid_points)} original)")
     
     # Use only nearby points for interpolation
     filtered_points = grid_points[nearby_indices]
@@ -162,6 +162,86 @@ def benchmark_interpolation_methods(kspace_data, rosette_traj, FoV, Kmax_res):
             results[name] = {'success': False, 'error': str(e)}
     
     return results
+
+import torch
+import torch.nn.functional as F
+
+@torch.no_grad()
+def _compute_kmax_from_fov(H, W, FoV_mm: float):
+    # Match your original formula; uses the readout size (W) for Kmax.
+    # If you prefer min(H,W), replace W with min(H, W).
+    return (W / (FoV_mm * 1e-3)) / 2.0
+
+def fast_kspace_interpolation_v3_torch(
+    kspace_data: torch.Tensor,    # (H, W) real or complex64/complex128
+    rosette_traj: torch.Tensor,   # (M,) complex tensor: kx + i ky  [in 1/m]
+    FoV: float = 224.0,           # FoV in mm (same convention as your NumPy code)
+    clamp_to_grid: bool = True,   # clamp coords to [-1, 1] instead of zero-padding outside
+):
+    """
+    Differentiable k-space interpolation using bilinear sampling (grid_sample).
+
+    Args:
+        kspace_data: (H, W) tensor. If complex, use complex dtype; if real, it's treated as a single channel.
+                     H corresponds to ky (rows), W to kx (cols) on a Cartesian grid.
+        rosette_traj: (M,) complex tensor with kx in real part and ky in imag part, in units of 1/m.
+        FoV: Field of view in millimeters. Used to compute Kmax so physical k-space units map to grid.
+        clamp_to_grid: If True, coordinates outside [-1, 1] are softly clamped (keeps grads).
+                       If False, we use padding_mode='zeros' (samples become exactly 0 outside).
+
+    Returns:
+        sampled: (M,) tensor matching the dtype (real/complex) of kspace_data.
+    """
+    if not torch.is_tensor(kspace_data) or not torch.is_tensor(rosette_traj):
+        raise TypeError("Inputs must be PyTorch tensors.")
+
+    # Shapes
+    H, W = kspace_data.shape[-2:]
+
+    # Compute Kmax (matches your original Nx/FoV/2 formula; using W≡Nx/readout)
+    Kmax = _compute_kmax_from_fov(H, W, FoV)
+
+    # Split trajectory (expects complex traj: kx + i ky)
+    if not torch.is_complex(rosette_traj):
+        raise ValueError("rosette_traj must be a complex tensor with kx in real and ky in imag parts.")
+    kx = rosette_traj.real   # (M,)
+    ky = rosette_traj.imag   # (M,)
+
+    # Map physical k-space coords to normalized grid_sample coords in [-1, 1].
+    # align_corners=True ⇒ -Kmax ↦ -1 and +Kmax ↦ +1 exactly.
+    x_norm = kx / Kmax
+    y_norm = ky / Kmax
+
+    if clamp_to_grid:
+        # Smooth clamp to keep gradients (as opposed to hard zero outside)
+        x_norm = torch.clamp(x_norm, -1.0, 1.0)
+        y_norm = torch.clamp(y_norm, -1.0, 1.0)
+
+    # Build grid for grid_sample: shape (N=1, Hout=1, Wout=M, 2)
+    # grid[..., 0] = x, grid[..., 1] = y
+    grid = torch.stack((x_norm, y_norm), dim=-1).view(1, 1, -1, 2)
+
+    # Prepare input as (N=1, C, H, W). Handle complex by 2 channels (Re, Im).
+    if torch.is_complex(kspace_data):
+        data_2ch = torch.view_as_real(kspace_data)  # (H, W, 2)
+        data_2ch = data_2ch.permute(2, 0, 1).unsqueeze(0)  # (1, 2, H, W)
+        y = F.grid_sample(
+            data_2ch, grid, mode="bilinear",
+            padding_mode="zeros", align_corners=True
+        )  # (1, 2, 1, M)
+        y = y.squeeze(0).squeeze(1).permute(1, 0)  # (M, 2)
+        y = y.contiguous()  # Ensure contiguous memory layout for view_as_complex
+        sampled = torch.view_as_complex(y)         # (M,)
+    else:
+        data_1ch = kspace_data.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+        y = F.grid_sample(
+            data_1ch, grid, mode="bilinear",
+            padding_mode="zeros", align_corners=True
+        )  # (1, 1, 1, M)
+        sampled = y.squeeze(0).squeeze(0).squeeze(0)      # (M,)
+
+    return sampled
+
 
 def original_method(kspace_data, rosette_traj, FoV):
     """Original method for comparison"""

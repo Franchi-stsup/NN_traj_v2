@@ -66,6 +66,18 @@ def create_structured_subfolder(save_path='plots', mode_suffix=None, **kwargs):
             params.append(f"fd{kwargs['first_deriv_weight']}")
         if 'second_deriv_weight' in kwargs:
             params.append(f"sd{kwargs['second_deriv_weight']}")
+
+    elif 'use_bart_loss' in kwargs and kwargs['use_bart_loss']:
+        params.append("bart")
+        # Add BART loss weights if present
+        if 'mse_weight' in kwargs:
+            params.append(f"mse{kwargs['mse_weight']}")
+        if 'first_deriv_weight' in kwargs:
+            params.append(f"fd{kwargs['first_deriv_weight']}")
+        if 'second_deriv_weight' in kwargs:
+            params.append(f"sd{kwargs['second_deriv_weight']}")
+        if 'sssim_weight' in kwargs:
+            params.append(f"ss{kwargs['sssim_weight']}")
     
     # Add mode suffix if provided
     if mode_suffix:
@@ -99,9 +111,109 @@ def plot_training_curves(train_losses, val_losses, save_path='plots', **kwargs):
     plt.grid(True)
     plt.savefig(os.path.join(run_folder, 'training_loss.png'), dpi=300, bbox_inches='tight')
     plt.close()  # Close figure to free memory
-    # plt.show()  # Disabled - only save figures
     
-    return run_folder  # Return the folder path for other functions to use
+    return run_folder  # Make sure to return the folder
+
+
+def plot_losses(detailed_losses, save_path='plots', loss_type='bart', run_folder=None, **kwargs):
+    """
+    Plot detailed loss components for BartLoss or SmoothLoss training
+    
+    Args:
+        detailed_losses: Dictionary with epoch data and component losses
+                        Structure: {'epochs': [], 'train': {components}, 'val': {components}}
+        save_path: Directory to save plots
+        loss_type: Type of loss ('bart' or 'smooth') to determine component names
+        run_folder: Specific run folder to use (if None, creates new folder)
+        **kwargs: Additional parameters for folder creation (only used if run_folder is None)
+    """
+    print(f"DEBUG: plot_losses called with save_path={save_path}, run_folder={run_folder}, loss_type={loss_type}")
+    
+    # Use existing run folder or create new one
+    if run_folder is None:
+        run_folder = create_run_folder(save_path, **kwargs)
+        print(f"DEBUG: plot_losses created new run_folder: {run_folder}")
+    else:
+        print(f"DEBUG: plot_losses using provided run_folder: {run_folder}")
+    
+    epochs = detailed_losses['epochs']
+    train_data = detailed_losses['train']
+    val_data = detailed_losses['val']
+    
+    # Extract weights from kwargs for proper weighting of loss components
+    mse_weight = kwargs.get('mse_weight', 1e-6)
+    first_deriv_weight = kwargs.get('first_deriv_weight', 0.0005)
+    second_deriv_weight = kwargs.get('second_deriv_weight', 0.001)
+    sssim_weight = kwargs.get('sssim_weight', 20.0)
+    
+    # Define component names and colors based on loss type
+    if loss_type.lower() == 'bart':
+        components = [
+            ('total_loss', 'Total Loss', 'black', 1.0),
+            ('ssim_loss', f'SSIM Loss (×{sssim_weight})', 'red', sssim_weight),
+            ('mse_loss', f'MSE Loss (×{mse_weight})', 'blue', mse_weight),
+            ('first_deriv_penalty', f'First Derivative Penalty (×{first_deriv_weight})', 'green', first_deriv_weight),
+            ('second_deriv_penalty', f'Second Derivative Penalty (×{second_deriv_weight})', 'orange', second_deriv_weight)
+        ]
+        title_prefix = "BART Loss"
+    elif loss_type.lower() == 'smooth':
+        components = [
+            ('total_loss', 'Total Loss', 'black', 1.0),
+            ('mse_loss', f'MSE Loss (×{mse_weight})', 'blue', mse_weight),
+            ('first_deriv_mse', f'First Derivative MSE (×{first_deriv_weight})', 'green', first_deriv_weight),
+            ('second_deriv_mse', f'Second Derivative MSE (×{second_deriv_weight})', 'orange', second_deriv_weight)
+        ]
+        title_prefix = "Smooth Loss"
+    else:
+        # Generic case - use whatever components are available
+        components = [(key, key.replace('_', ' ').title(), 'blue', 1.0) 
+                     for key in train_data.keys()]
+        title_prefix = "Loss"
+    
+    # Create two subplots side by side - training and validation
+    fig, (ax_train, ax_val) = plt.subplots(1, 2, figsize=(16, 8))
+    
+    # Plot training losses
+    for comp_key, comp_name, color, weight in components:
+        if comp_key in train_data and train_data[comp_key]:
+            # Apply weight to loss components (except total_loss which is already weighted)
+            plot_values = train_data[comp_key] if comp_key == 'total_loss' else [val * weight for val in train_data[comp_key]]
+            ax_train.plot(epochs, plot_values, 
+                         label=f'{comp_name}', color=color, linestyle='-', linewidth=2, alpha=0.8)
+    
+    ax_train.set_xlabel('Epoch')
+    ax_train.set_ylabel('Weighted Loss Value')
+    ax_train.set_title(f'{title_prefix}: Training Set (Weighted Components)')
+    ax_train.legend()
+    ax_train.grid(True, alpha=0.3)
+    ax_train.set_yscale('log')  # Use log scale for better visualization
+    
+    # Plot validation losses
+    for comp_key, comp_name, color, weight in components:
+        if comp_key in val_data and val_data[comp_key]:
+            # Apply weight to loss components (except total_loss which is already weighted)
+            plot_values = val_data[comp_key] if comp_key == 'total_loss' else [val * weight for val in val_data[comp_key]]
+            ax_val.plot(epochs, plot_values, 
+                       label=f'{comp_name}', color=color, linestyle='-', linewidth=2, alpha=0.8)
+    
+    ax_val.set_xlabel('Epoch')
+    ax_val.set_ylabel('Weighted Loss Value')
+    ax_val.set_title(f'{title_prefix}: Validation Set (Weighted Components)')
+    ax_val.legend()
+    ax_val.grid(True, alpha=0.3)
+    ax_val.set_yscale('log')  # Use log scale for better visualization
+    
+    plt.tight_layout()
+    
+    # Save the plot
+    save_filename = f'{title_prefix.lower().replace(" ", "_")}_detailed_losses.png'
+    plt.savefig(os.path.join(run_folder, save_filename), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Detailed loss plots saved to: {run_folder}")
+    print(f"- Training and Validation components: {save_filename}")
+    
+    return run_folder
 
 
 def visualize_results(model, dataset, num_samples=3, save_path='plots', run_folder=None):
@@ -179,8 +291,48 @@ def plot_circle(model, dataset, sample_idx=0, save_path='plots', run_folder=None
 
 
 def calculate_derivatives(kx, ky, dt=DT_NN):
+    # """
+    # Calculate first and second derivatives of kx and ky
+    
+    # Args:
+    #     kx: numpy array of kx coordinates (128 points)
+    #     ky: numpy array of ky coordinates (128 points)
+    #     dt: time step in seconds (default 5ms)
+    
+    # Returns:
+    #     dict containing first and second derivatives
+    # """
+    # # First derivatives (velocity)
+    # dkx_dt = np.gradient(kx, dt, edge_order=1)  # dx/dt
+    # dky_dt = np.gradient(ky, dt, edge_order=1)  # dy/dt
+
+    # # Second derivatives (acceleration)
+    # d2kx_dt2 = np.gradient(dkx_dt, dt, edge_order=1)  # d²x/dt²
+    # d2ky_dt2 = np.gradient(dky_dt, dt, edge_order=1)  # d²y/dt²
+
+    # # Calculate magnitude of velocity and acceleration
+    # velocity_magnitude = np.sqrt(dkx_dt**2 + dky_dt**2)
+    # acceleration_magnitude = np.sqrt(d2kx_dt2**2 + d2ky_dt2**2)
+    
+
+    # # Divide by gamma to convert to physical units (Hz)
+    # dkx_dt /= GAMMA
+    # dky_dt /= GAMMA
+    # d2kx_dt2 /= GAMMA
+    # d2ky_dt2 /= GAMMA
+    # velocity_magnitude /= GAMMA
+    # acceleration_magnitude /= GAMMA
+    # return {
+    #     'dkx_dt': dkx_dt,
+    #     'dky_dt': dky_dt,
+    #     'd2kx_dt2': d2kx_dt2,
+    #     'd2ky_dt2': d2ky_dt2,
+    #     'velocity_magnitude': velocity_magnitude,
+    #     'acceleration_magnitude': acceleration_magnitude
+    # }
     """
-    Calculate first and second derivatives of kx and ky
+    Calculate first and second derivatives of kx and ky using central differences
+    with periodic wrap-around to preserve the same number of points.
     
     Args:
         kx: numpy array of kx coordinates (128 points)
@@ -190,19 +342,35 @@ def calculate_derivatives(kx, ky, dt=DT_NN):
     Returns:
         dict containing first and second derivatives
     """
-    # First derivatives (velocity)
-    dkx_dt = np.gradient(kx, dt)  # dx/dt
-    dky_dt = np.gradient(ky, dt)  # dy/dt
+    # First derivatives using second-order central differences with periodic wrap-around
+    # Get kx_{i+1} and kx_{i-1} for all points using periodic wrap-around
+    kx_plus_1 = np.roll(kx, -1)  # shift elements left (forward in time)
+    kx_minus_1 = np.roll(kx, 1)   # shift elements right (backward in time)
     
-    # Second derivatives (acceleration)
-    d2kx_dt2 = np.gradient(dkx_dt, dt)  # d²x/dt²
-    d2ky_dt2 = np.gradient(dky_dt, dt)  # d²y/dt²
+    # Same for ky
+    ky_plus_1 = np.roll(ky, -1)
+    ky_minus_1 = np.roll(ky, 1)
+    
+    # Apply the second-order central difference formula for first derivatives
+    dkx_dt = (kx_plus_1 - kx_minus_1) / (2 * dt)
+    dky_dt = (ky_plus_1 - ky_minus_1) / (2 * dt)
+
+    # Second derivatives using central differences on the first derivatives
+    # Apply periodic wrap-around to first derivatives
+    dkx_dt_plus_1 = np.roll(dkx_dt, -1)
+    dkx_dt_minus_1 = np.roll(dkx_dt, 1)
+    
+    dky_dt_plus_1 = np.roll(dky_dt, -1)
+    dky_dt_minus_1 = np.roll(dky_dt, 1)
+    
+    # Second derivatives using central differences
+    d2kx_dt2 = (dkx_dt_plus_1 - dkx_dt_minus_1) / (2 * dt)
+    d2ky_dt2 = (dky_dt_plus_1 - dky_dt_minus_1) / (2 * dt)
 
     # Calculate magnitude of velocity and acceleration
     velocity_magnitude = np.sqrt(dkx_dt**2 + dky_dt**2)
     acceleration_magnitude = np.sqrt(d2kx_dt2**2 + d2ky_dt2**2)
     
-
     # Divide by gamma to convert to physical units (Hz)
     dkx_dt /= GAMMA
     dky_dt /= GAMMA
@@ -210,6 +378,7 @@ def calculate_derivatives(kx, ky, dt=DT_NN):
     d2ky_dt2 /= GAMMA
     velocity_magnitude /= GAMMA
     acceleration_magnitude /= GAMMA
+    
     return {
         'dkx_dt': dkx_dt,
         'dky_dt': dky_dt,
@@ -340,7 +509,7 @@ def plot_derivatives(kx_target, ky_target, kx_pred, ky_pred, dt=DT_NN, save_path
     return target_derivs, pred_derivs
 
 
-def plot_trajectory_shift_comparison(kx, ky, kx_shifted, ky_shifted, save_path, filename='trajectory_shift_demo.png'):
+def plot_trajectory_shift_comparison(kx, ky, kx_shifted, ky_shifted, save_path, filename='trajectory_shift_demo.png', run_folder=None):
     """
     Plot comparison between original and shifted trajectories
     
@@ -349,10 +518,16 @@ def plot_trajectory_shift_comparison(kx, ky, kx_shifted, ky_shifted, save_path, 
         kx_shifted, ky_shifted: shifted trajectory coordinates
         save_path: directory to save the plot
         filename: name of the output file
+        run_folder: specific run folder (if None, uses save_path)
     
     Returns:
         str: path to saved plot
     """
+    # Use existing run folder or create plots directory
+    if run_folder is None:
+        run_folder = save_path
+    os.makedirs(run_folder, exist_ok=True)
+    
     plt.figure(figsize=(12, 5))
     
     plt.subplot(1, 2, 1)
@@ -372,14 +547,14 @@ def plot_trajectory_shift_comparison(kx, ky, kx_shifted, ky_shifted, save_path, 
     plt.axis('equal')
     
     plt.tight_layout()
-    plot_path = os.path.join(save_path, filename)
+    plot_path = os.path.join(run_folder, filename)
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()
     
     return plot_path
 
 
-def plot_rotated_trajectories(kSpaceTrj, save_path, filename='trajectory_rotations_demo.png'):
+def plot_rotated_trajectories(kSpaceTrj, save_path, filename='trajectory_rotations_demo.png', run_folder=None):
     """
     Plot rotated trajectories
     
@@ -387,14 +562,20 @@ def plot_rotated_trajectories(kSpaceTrj, save_path, filename='trajectory_rotatio
         kSpaceTrj: dictionary with 'kxx' and 'kyy' arrays
         save_path: directory to save the plot
         filename: name of the output file
+        run_folder: specific run folder (if None, uses save_path)
     
     Returns:
         str: path to saved plot
     """
+    # Use existing run folder or create plots directory
+    if run_folder is None:
+        run_folder = save_path
+    os.makedirs(run_folder, exist_ok=True)
+    
     plt.figure(figsize=(8, 8))
     kxx = kSpaceTrj['kxx']
     kyy = kSpaceTrj['kyy']
-    n_rotations = kxx.shape[1]
+    n_rotations = kxx.shape[0]
     
     for i in range(kxx.shape[0]):
         plt.plot(kxx[i, :], kyy[i, :], lw=0.8, alpha=0.7)
@@ -405,14 +586,14 @@ def plot_rotated_trajectories(kSpaceTrj, save_path, filename='trajectory_rotatio
     plt.title(f"Rotated k-space Trajectories (n={n_rotations})")
     plt.grid(True, alpha=0.3)
     
-    plot_path = os.path.join(save_path, filename)
+    plot_path = os.path.join(run_folder, filename)
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()
     
     return plot_path
 
 
-def plot_trajectory_utilities_combined(kx, ky, kx_shifted, ky_shifted, kSpaceTrj, save_path, filename='trajectory_utilities_combined.png'):
+def plot_trajectory_utilities_combined(kx, ky, kx_shifted, ky_shifted, kSpaceTrj, save_path, filename='trajectory_utilities_combined.png', run_folder=None):
     """
     Plot combined view of original, shifted, and rotated trajectories
     
@@ -422,10 +603,16 @@ def plot_trajectory_utilities_combined(kx, ky, kx_shifted, ky_shifted, kSpaceTrj
         kSpaceTrj: dictionary with 'kxx' and 'kyy' arrays for rotated trajectories
         save_path: directory to save the plot
         filename: name of the output file
+        run_folder: specific run folder (if None, uses save_path)
     
     Returns:
         str: path to saved plot
     """
+    # Use existing run folder or create plots directory
+    if run_folder is None:
+        run_folder = save_path
+    os.makedirs(run_folder, exist_ok=True)
+    
     plt.figure(figsize=(10, 8))
     
     kxx = kSpaceTrj['kxx']
@@ -449,7 +636,7 @@ def plot_trajectory_utilities_combined(kx, ky, kx_shifted, ky_shifted, kSpaceTrj
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    plot_path = os.path.join(save_path, filename)
+    plot_path = os.path.join(run_folder, filename)
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()
     

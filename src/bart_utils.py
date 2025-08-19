@@ -122,13 +122,13 @@ def run_bart_nufft(mrData, kSpaceTrj, para, run_gpu=False):
     mrData_reshaped = mrData.reshape(shape)
     mrData2 = np.squeeze(mrData_reshaped)
     mrData2 = mrData2[np.newaxis, :, :]
-
+    # print(f"Reshaped mrData: {mrData2.shape}")
     # --- BART NUFFT reconstruction ---
     if run_gpu:
-        print(f"Run_gpu = {run_gpu}")
+        # print(f"Run_gpu = {run_gpu}")
         reconMrsi = bart(1, 'nufft -i -t -g', kspaceRSI, mrData2)
     else: 
-        print(f"Run_gpu = {run_gpu}")
+        # print(f"Run_gpu = {run_gpu}")
         reconMrsi = bart(1, 'nufft -i -t', kspaceRSI, mrData2)
     return reconMrsi
 
@@ -418,8 +418,24 @@ def plot_comparison(ground_truth_img_down_norm: np.ndarray, img_reconstructed: n
     plt.colorbar(im2, shrink=0.8)
 
     plt.tight_layout()
-    if save_path:
+    
+    # Add timestamp to filename if it's the default comparison.png
+    if save_path and 'comparison.png' in save_path:
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Replace comparison.png with timestamped version
+        timestamped_path = save_path.replace('comparison.png', f'{timestamp}_comparison.png')
+        
+        # Ensure directory exists
+        import os
+        os.makedirs(os.path.dirname(timestamped_path), exist_ok=True)
+        
+        plt.savefig(timestamped_path, dpi=300, bbox_inches='tight')
+        print(f"   Saved reconstruction comparison to: {timestamped_path}")
+    elif save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        
     if show:
         plt.show()
     else:
